@@ -1,1 +1,5 @@
+python-telegram-bot==22.3
+aiohttp==3.12.15
+flask==3.1.2
+httpx==0.28.1
 
