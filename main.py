@@ -186,7 +186,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.args:
         await _deliver_movie_files(update, context, context.args[0])
         return
-    await update.message.reply_text(f"سلام 👋\nفیلم‌ها رو از گروه عمومی انتخاب کنید.\nhttps://t.me/GoldStarMusic3")
+    await update.message.reply_text(f"سلام 👋\nفیلم‌ها رو از گروه عمومی انتخاب کنید.\n{BOT_LINK}")
 
 async def download(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.args:
@@ -250,12 +250,15 @@ async def private_group_monitor(update: Update, context: ContextTypes.DEFAULT_TY
 # ───── اجرای همزمان ─────
 def main():
     init_db()
+
     telegram_app = ApplicationBuilder().token(TOKEN).build()
     telegram_app.add_handler(CommandHandler("start", start))
     telegram_app.add_handler(CommandHandler("download", download))
     telegram_app.add_handler(CommandHandler("cancel", cancel))
 
-    private_group_filter = filters.Chat(PRIVATE_GROUP_ID) & (filters.PHOTO | filters.VIDEO | filters.Document.ALL | filters.Sticker.ALL)
+    private_group_filter = filters.Chat(PRIVATE_GROUP_ID) & (
+        filters.PHOTO | filters.VIDEO | filters.Document.ALL | filters.Sticker.ALL
+    )
     telegram_app.add_handler(MessageHandler(private_group_filter, private_group_monitor))
 
     Thread(target=run_flask, daemon=True).start()
@@ -263,4 +266,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
