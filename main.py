@@ -14,34 +14,46 @@ from telegram.ext import (
     filters,
 )
 import logging
+from dotenv import load_dotenv
 
-# ───── لاگ‌گیری ─────
-logging.basicConfig(level=logging.INFO)
+# ───── Load Secrets ─────
+# Render Secret Files یا Environment Variables
+env_path = "/etc/secrets/.env"  # اگر Secret File آپلود کردی
+if os.path.exists(env_path):
+    load_dotenv(env_path)
+else:
+    load_dotenv()  # fallback برای local testing
 
-# ───── تنظیمات نهایی ─────
-TOKEN = "8360522775:AAEUbSR_S7_mM7RPPMfkv6yk6WBXPiSy2sY"
-PRIVATE_GROUP_ID = -1001311582958
-PUBLIC_GROUP_ID = -1001081524118
-BOT_LINK = "https://t.me/GoldStarMusicMoviebot"
+TOKEN = os.environ.get("BOT_TOKEN")
+PRIVATE_GROUP_ID = int(os.environ.get("PRIVATE_GROUP_ID", 0))
+PUBLIC_GROUP_ID = int(os.environ.get("PUBLIC_GROUP_ID", 0))
+BOT_LINK = os.environ.get("BOT_LINK", "")
 DB_PATH = "movies.db"
 USER_LIST_FILE = "users.txt"
 os.makedirs("movie_files", exist_ok=True)
 
-# ───── Draft ─────
+# ───── Logging ─────
+logging.basicConfig(level=logging.INFO)
+
+# ───── Draft Storage ─────
 DRAFTS = {}
 
 # ───── Flask ─────
-app = Flask("")
+app = Flask("GoldStarMovieBot")
 
 @app.route("/")
 def home():
     return "✅ GoldStarMovieBot is running!"
 
+@app.route("/health")
+def health():
+    return "OK", 200
+
 def run_flask():
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
 
-# ───── دیتابیس ─────
+# ───── Database ─────
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     conn.execute('''
@@ -83,7 +95,7 @@ def get_movie(movie_id):
         }
     return None
 
-# ───── مدیریت کاربران ─────
+# ───── Users ─────
 def save_user(user_id):
     try:
         if not os.path.exists(USER_LIST_FILE):
@@ -105,7 +117,7 @@ async def is_member_public_group(context: ContextTypes.DEFAULT_TYPE, user_id: in
     except Exception:
         return False
 
-# ───── ارسال پوستر و لینک به گروه عمومی ─────
+# ───── Send Posters ─────
 async def send_poster_to_public(context: ContextTypes.DEFAULT_TYPE, movie_id: str):
     movie = get_movie(movie_id)
     if not movie:
@@ -127,14 +139,14 @@ async def send_poster_to_public(context: ContextTypes.DEFAULT_TYPE, movie_id: st
         except Exception as e:
             print("Error sending poster:", e)
 
-# ───── ارسال فایل‌ها به کاربر ─────
+# ───── Deliver Movie Files ─────
 async def _deliver_movie_files(update: Update, context: ContextTypes.DEFAULT_TYPE, movie_id: str):
     user_id = update.effective_user.id
 
     if not await is_member_public_group(context, user_id):
         await context.bot.send_message(
             chat_id=user_id,
-            text=f"برای دانلود، لطفاً عضو گروه شوید:\nhttps://t.me/GoldStarMusic3",
+            text=f"برای دانلود، لطفاً عضو گروه شوید:\n{os.environ.get('PUBLIC_GROUP_LINK')}",
             disable_web_page_preview=True
         )
         return
@@ -173,20 +185,20 @@ async def _deliver_movie_files(update: Update, context: ContextTypes.DEFAULT_TYP
 
     asyncio.create_task(delete_after_delay(user_id, sent_messages))
 
-# ───── Timeout Draft ─────
+# ───── Draft Timeout ─────
 async def draft_timeout(chat_id: int, delay: int = 600):
     await asyncio.sleep(delay)
     if chat_id in DRAFTS:
         DRAFTS.pop(chat_id, None)
         print(f"Draft in chat {chat_id} expired due to timeout.")
 
-# ───── دستورات ─────
+# ───── Commands ─────
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_user(update.effective_user.id)
     if context.args:
         await _deliver_movie_files(update, context, context.args[0])
         return
-    await update.message.reply_text(f"سلام 👋\nفیلم‌ها رو از گروه عمومی انتخاب کنید.\n{BOT_LINK}")
+    await update.message.reply_text(f"سلام 👋\nفیلم‌ها رو از گروه عمومی انتخاب کنید.\n{os.environ.get('PUBLIC_GROUP_LINK')}")
 
 async def download(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.args:
@@ -202,7 +214,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("❌ Draft فعالی وجود ندارد.")
 
-# ───── مانیتور گروه خصوصی ─────
+# ───── Private Group Monitor ─────
 async def private_group_monitor(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     if not message:
@@ -247,18 +259,15 @@ async def private_group_monitor(update: Update, context: ContextTypes.DEFAULT_TY
         )
         await send_poster_to_public(context, movie_id)
 
-# ───── اجرای همزمان ─────
+# ───── Main ─────
 def main():
     init_db()
-
     telegram_app = ApplicationBuilder().token(TOKEN).build()
     telegram_app.add_handler(CommandHandler("start", start))
     telegram_app.add_handler(CommandHandler("download", download))
     telegram_app.add_handler(CommandHandler("cancel", cancel))
 
-    private_group_filter = filters.Chat(PRIVATE_GROUP_ID) & (
-        filters.PHOTO | filters.VIDEO | filters.Document.ALL | filters.Sticker.ALL
-    )
+    private_group_filter = filters.Chat(PRIVATE_GROUP_ID) & (filters.PHOTO | filters.VIDEO | filters.Document.ALL | filters.Sticker.ALL)
     telegram_app.add_handler(MessageHandler(private_group_filter, private_group_monitor))
 
     Thread(target=run_flask, daemon=True).start()
