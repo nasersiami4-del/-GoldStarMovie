@@ -14,7 +14,8 @@ from telegram.ext import (
     filters,
 )
 import logging
-from dotenv import load_dotenv  # ← اضافه شد
+from dotenv import load_dotenv
+from supabase import create_client, Client
 
 # ───── بارگذاری متغیرهای محیطی از فایل .env ─────
 load_dotenv()
@@ -32,6 +33,9 @@ PUBLIC_GROUP_LINK = os.environ.get("PUBLIC_GROUP_LINK")
 PORT = int(os.environ.get("PORT", 8080))
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")
+
+# ───── اتصال به Supabase ─────
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
 DB_PATH = "movies.db"
 USER_LIST_FILE = "users.txt"
@@ -60,7 +64,7 @@ def print_public_url():
     else:
         print("Could not determine public URL automatically.")
 
-# ───── دیتابیس ─────
+# ───── دیتابیس SQLite ─────
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     conn.execute('''
@@ -72,6 +76,11 @@ def init_db():
             season INTEGER DEFAULT 0,
             episode INTEGER DEFAULT 0,
             files_json TEXT
+        )
+    ''')
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            user_id TEXT PRIMARY KEY
         )
     ''')
     conn.close()
@@ -102,21 +111,61 @@ def get_movie(movie_id):
         }
     return None
 
-# ───── مدیریت کاربران ─────
 def save_user(user_id):
     try:
-        if not os.path.exists(USER_LIST_FILE):
-            with open(USER_LIST_FILE, "w", encoding="utf-8") as f:
-                f.write(f"{user_id}\n")
-        else:
-            with open(USER_LIST_FILE, "r", encoding="utf-8") as f:
-                lines = f.read().splitlines()
-            if str(user_id) not in lines:
-                with open(USER_LIST_FILE, "a", encoding="utf-8") as f:
-                    f.write(f"{user_id}\n")
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (str(user_id),))
+        conn.commit()
+        conn.close()
     except Exception as e:
         print("Error saving user:", e)
 
+# ───── دیتابیس Supabase ─────
+def add_movie_supabase(movie_id, poster_file_ids, description, is_series=0, season=0, episode=0, files_json=None):
+    supabase.table("movies").upsert({
+        "movie_id": movie_id,
+        "poster_file_ids": json.dumps(poster_file_ids),
+        "description": description,
+        "is_series": is_series,
+        "season": season,
+        "episode": episode,
+        "files_json": files_json
+    }).execute()
+
+def get_movie_supabase(movie_id):
+    response = supabase.table("movies").select("*").eq("movie_id", movie_id).execute()
+    data = response.data
+    if data:
+        row = data[0]
+        return {
+            "poster_file_ids": json.loads(row.get("poster_file_ids", "[]")),
+            "description": row.get("description", ""),
+            "is_series": row.get("is_series", 0),
+            "season": row.get("season", 0),
+            "episode": row.get("episode", 0),
+            "files": json.loads(row.get("files_json", "[]"))
+        }
+    return None
+
+def save_user_supabase(user_id):
+    supabase.table("users").upsert({"user_id": str(user_id)}).execute()
+
+# ───── فانکشن‌های ترکیبی برای استفاده همزمان ─────
+def add_movie_both(movie_id, poster_file_ids, description, is_series=0, season=0, episode=0, files_json=None):
+    add_movie(movie_id, poster_file_ids, description, is_series, season, episode, files_json)
+    add_movie_supabase(movie_id, poster_file_ids, description, is_series, season, episode, files_json)
+
+def get_movie_both(movie_id):
+    movie = get_movie(movie_id)
+    if movie:
+        return movie
+    return get_movie_supabase(movie_id)
+
+def save_user_both(user_id):
+    save_user(user_id)
+    save_user_supabase(user_id)
+
+# ───── مدیریت گروه و فایل‌ها ─────
 async def is_member_public_group(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> bool:
     try:
         member = await context.bot.get_chat_member(PUBLIC_GROUP_ID, user_id)
@@ -124,9 +173,8 @@ async def is_member_public_group(context: ContextTypes.DEFAULT_TYPE, user_id: in
     except Exception:
         return False
 
-# ───── ارسال پوستر و لینک به گروه عمومی ─────
 async def send_poster_to_public(context: ContextTypes.DEFAULT_TYPE, movie_id: str):
-    movie = get_movie(movie_id)
+    movie = get_movie_both(movie_id)
     if not movie:
         print(f"Movie {movie_id} not found!")
         return
@@ -146,10 +194,8 @@ async def send_poster_to_public(context: ContextTypes.DEFAULT_TYPE, movie_id: st
         except Exception as e:
             print("Error sending poster:", e)
 
-# ───── ارسال فایل‌ها به کاربر ─────
 async def _deliver_movie_files(update: Update, context: ContextTypes.DEFAULT_TYPE, movie_id: str):
     user_id = update.effective_user.id
-
     if not await is_member_public_group(context, user_id):
         await context.bot.send_message(
             chat_id=user_id,
@@ -158,7 +204,7 @@ async def _deliver_movie_files(update: Update, context: ContextTypes.DEFAULT_TYP
         )
         return
 
-    movie = get_movie(movie_id)
+    movie = get_movie_both(movie_id)
     if not movie or not movie.get('files'):
         await context.bot.send_message(chat_id=user_id, text="❌ فایل یافت نشد.")
         return
@@ -192,7 +238,7 @@ async def _deliver_movie_files(update: Update, context: ContextTypes.DEFAULT_TYP
 
     asyncio.create_task(delete_after_delay(user_id, sent_messages))
 
-# ───── Timeout Draft ─────
+# ───── Draft Timeout ─────
 async def draft_timeout(chat_id: int, delay: int = 600):
     await asyncio.sleep(delay)
     if chat_id in DRAFTS:
@@ -201,7 +247,7 @@ async def draft_timeout(chat_id: int, delay: int = 600):
 
 # ───── دستورات ─────
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    save_user(update.effective_user.id)
+    save_user_both(update.effective_user.id)
     if context.args:
         await _deliver_movie_files(update, context, context.args[0])
         return
@@ -255,7 +301,7 @@ async def private_group_monitor(update: Update, context: ContextTypes.DEFAULT_TY
     if message.sticker and chat_id in DRAFTS:
         draft = DRAFTS.pop(chat_id)
         movie_id = str(draft['start_message_id'])
-        add_movie(
+        add_movie_both(
             movie_id,
             poster_file_ids=draft.get('poster_file_ids', []),
             description=draft.get('description', ''),
