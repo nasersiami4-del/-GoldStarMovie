@@ -1,6 +1,5 @@
 import os
 import json
-import sqlite3
 import asyncio
 from threading import Thread
 from flask import Flask
@@ -14,18 +13,24 @@ from telegram.ext import (
     filters,
 )
 import logging
+from supabase import create_client, Client
 
 # ───── لاگ‌گیری ─────
 logging.basicConfig(level=logging.INFO)
 
-# ───── تنظیمات نهایی ─────
+# ───── تنظیمات ─────
 TOKEN = "8360522775:AAEUbSR_S7_mM7RPPMfkv6yk6WBXPiSy2sY"
 PRIVATE_GROUP_ID = -1001311582958
 PUBLIC_GROUP_ID = -1001081524118
 BOT_LINK = "https://t.me/GoldStarMusicMoviebot"
-DB_PATH = "movies.db"
-USER_LIST_FILE = "users.txt"
+ADMIN_ID = 135019937  # آی‌دی خودت
+DB_PATH = "movies.db"  # هنوز برای fallback نگه داشته شده
 os.makedirs("movie_files", exist_ok=True)
+
+# ───── Supabase ─────
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # ───── Draft ─────
 DRAFTS = {}
@@ -35,24 +40,15 @@ app = Flask("")
 
 @app.route("/")
 def home():
-    return "✅ GoldStarMovieBot is running on Replit!"
+    return "✅ GoldStarMovieBot is running!"
 
 def run_flask():
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
 
-# ───── پرینت لینک عمومی Replit ─────
-def print_public_url():
-    repl_owner = os.environ.get("REPL_OWNER")
-    repl_name = os.environ.get("REPL_SLUG")
-    if repl_owner and repl_name:
-        public_url = f"https://{repl_name}.{repl_owner}.repl.co/"
-        print(f"Public URL (for UptimeRobot): {public_url}")
-    else:
-        print("Could not determine public URL automatically.")
-
-# ───── دیتابیس ─────
+# ───── دیتابیس محلی (fallback) ─────
 def init_db():
+    import sqlite3
     conn = sqlite3.connect(DB_PATH)
     conn.execute('''
         CREATE TABLE IF NOT EXISTS movies (
@@ -67,44 +63,10 @@ def init_db():
     ''')
     conn.close()
 
-def add_movie(movie_id, poster_file_ids, description, is_series=0, season=0, episode=0, files_json=None):
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute('''
-        INSERT OR REPLACE INTO movies 
-        (movie_id, poster_file_ids, description, is_series, season, episode, files_json)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-    ''', (movie_id, json.dumps(poster_file_ids), description, is_series, season, episode, files_json))
-    conn.commit()
-    conn.close()
-
-def get_movie(movie_id):
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.execute("SELECT * FROM movies WHERE movie_id = ?", (movie_id,))
-    row = cur.fetchone()
-    conn.close()
-    if row:
-        return {
-            "poster_file_ids": json.loads(row[1]) if row[1] else [],
-            "description": row[2] or "",
-            "is_series": row[3] or 0,
-            "season": row[4] or 0,
-            "episode": row[5] or 0,
-            "files": json.loads(row[6]) if row[6] else []
-        }
-    return None
-
-# ───── مدیریت کاربران ─────
-def save_user(user_id):
+# ───── Supabase: کاربران ─────
+def save_user(user_id: int):
     try:
-        if not os.path.exists(USER_LIST_FILE):
-            with open(USER_LIST_FILE, "w", encoding="utf-8") as f:
-                f.write(f"{user_id}\n")
-        else:
-            with open(USER_LIST_FILE, "r", encoding="utf-8") as f:
-                lines = f.read().splitlines()
-            if str(user_id) not in lines:
-                with open(USER_LIST_FILE, "a", encoding="utf-8") as f:
-                    f.write(f"{user_id}\n")
+        supabase.table("users").upsert({"user_id": user_id}).execute()
     except Exception as e:
         print("Error saving user:", e)
 
@@ -115,7 +77,32 @@ async def is_member_public_group(context: ContextTypes.DEFAULT_TYPE, user_id: in
     except Exception:
         return False
 
-# ───── ارسال پوستر و لینک به گروه عمومی ─────
+# ───── Supabase: فیلم‌ها ─────
+def add_movie(movie_id, poster_file_ids, description, is_series=0, season=0, episode=0, files=None):
+    try:
+        supabase.table("movies").upsert({
+            "movie_id": movie_id,
+            "poster_file_ids": poster_file_ids,
+            "description": description,
+            "is_series": is_series,
+            "season": season,
+            "episode": episode,
+            "files": files or []
+        }).execute()
+    except Exception as e:
+        print("Error adding movie:", e)
+
+def get_movie(movie_id):
+    try:
+        resp = supabase.table("movies").select("*").eq("movie_id", movie_id).execute()
+        data = resp.data
+        if data:
+            return data[0]
+    except Exception as e:
+        print("Error fetching movie:", e)
+    return None
+
+# ───── ارسال پوستر به گروه عمومی ─────
 async def send_poster_to_public(context: ContextTypes.DEFAULT_TYPE, movie_id: str):
     movie = get_movie(movie_id)
     if not movie:
@@ -183,7 +170,7 @@ async def _deliver_movie_files(update: Update, context: ContextTypes.DEFAULT_TYP
 
     asyncio.create_task(delete_after_delay(user_id, sent_messages))
 
-# ───── Timeout Draft ─────
+# ───── Draft Timeout ─────
 async def draft_timeout(chat_id: int, delay: int = 600):
     await asyncio.sleep(delay)
     if chat_id in DRAFTS:
@@ -193,10 +180,13 @@ async def draft_timeout(chat_id: int, delay: int = 600):
 # ───── دستورات ─────
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_user(update.effective_user.id)
+    reply_text = "سلام 👋\nفیلم‌ها رو از گروه عمومی انتخاب کنید.\n@GoldStarMusic3"
+    if update.effective_user.id == ADMIN_ID:
+        reply_text += "\n⚙️ تنظیمات"
     if context.args:
         await _deliver_movie_files(update, context, context.args[0])
         return
-    await update.message.reply_text("سلام 👋\nفیلم‌ها رو از گروه عمومی انتخاب کنید.\n@GoldStarMusic3")
+    await update.message.reply_text(reply_text)
 
 async def download(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.args:
@@ -253,14 +243,14 @@ async def private_group_monitor(update: Update, context: ContextTypes.DEFAULT_TY
             is_series=draft.get('is_series', 0),
             season=draft.get('season', 1),
             episode=draft.get('episode', 0),
-            files_json=json.dumps(draft.get('files', []), ensure_ascii=False)
+            files=draft.get('files', [])
         )
         await send_poster_to_public(context, movie_id)
 
 # ───── اجرای همزمان ─────
 def main():
     init_db()
-    print_public_url()  # لینک عمومی را هنگام ران شدن چاپ کن
+    Thread(target=run_flask, daemon=True).start()
 
     telegram_app = ApplicationBuilder().token(TOKEN).build()
     telegram_app.add_handler(CommandHandler("start", start))
@@ -270,7 +260,6 @@ def main():
     private_group_filter = filters.Chat(PRIVATE_GROUP_ID) & (filters.PHOTO | filters.VIDEO | filters.Document.ALL | filters.Sticker.ALL)
     telegram_app.add_handler(MessageHandler(private_group_filter, private_group_monitor))
 
-    Thread(target=run_flask, daemon=True).start()
     telegram_app.run_polling(close_loop=False)
 
 if __name__ == "__main__":
