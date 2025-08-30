@@ -16,17 +16,20 @@ from telegram.ext import (
 import logging
 from dotenv import load_dotenv
 
-# ───── Load Environment Variables ─────
-load_dotenv()
+# ───── Load Secrets ─────
+# Render Secret Files یا Environment Variables
+env_path = "/etc/secrets/.env"  # اگر Secret File آپلود کردی
+if os.path.exists(env_path):
+    load_dotenv(env_path)
+else:
+    load_dotenv()  # fallback برای local testing
 
 TOKEN = os.environ.get("BOT_TOKEN")
 PRIVATE_GROUP_ID = int(os.environ.get("PRIVATE_GROUP_ID", 0))
 PUBLIC_GROUP_ID = int(os.environ.get("PUBLIC_GROUP_ID", 0))
-PUBLIC_GROUP_LINK = os.environ.get("PUBLIC_GROUP_LINK", "")
 BOT_LINK = os.environ.get("BOT_LINK", "")
-DEFAULT_PROFIT = float(os.environ.get("DEFAULT_PROFIT", 0))
 DB_PATH = "movies.db"
-
+USER_LIST_FILE = "users.txt"
 os.makedirs("movie_files", exist_ok=True)
 
 # ───── Logging ─────
@@ -64,12 +67,6 @@ def init_db():
             files_json TEXT
         )
     ''')
-    conn.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            user_id TEXT PRIMARY KEY
-        )
-    ''')
-    conn.commit()
     conn.close()
 
 def add_movie(movie_id, poster_file_ids, description, is_series=0, season=0, episode=0, files_json=None):
@@ -100,10 +97,18 @@ def get_movie(movie_id):
 
 # ───── Users ─────
 def save_user(user_id):
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute('INSERT OR IGNORE INTO users(user_id) VALUES (?)', (str(user_id),))
-    conn.commit()
-    conn.close()
+    try:
+        if not os.path.exists(USER_LIST_FILE):
+            with open(USER_LIST_FILE, "w", encoding="utf-8") as f:
+                f.write(f"{user_id}\n")
+        else:
+            with open(USER_LIST_FILE, "r", encoding="utf-8") as f:
+                lines = f.read().splitlines()
+            if str(user_id) not in lines:
+                with open(USER_LIST_FILE, "a", encoding="utf-8") as f:
+                    f.write(f"{user_id}\n")
+    except Exception as e:
+        print("Error saving user:", e)
 
 async def is_member_public_group(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> bool:
     try:
@@ -122,7 +127,6 @@ async def send_poster_to_public(context: ContextTypes.DEFAULT_TYPE, movie_id: st
     caption_text = movie['description'].strip() or "🎬 GoldStarMovie"
     deep_link = f"{BOT_LINK}?start={movie_id}"
     caption_text += f'\n\n📥 <a href="{deep_link}">📥 Download | دانلـــود</a>'
-    caption_text += f"\n💰 سود: {DEFAULT_PROFIT}"
 
     for i, poster_id in enumerate(movie['poster_file_ids']):
         try:
@@ -138,10 +142,11 @@ async def send_poster_to_public(context: ContextTypes.DEFAULT_TYPE, movie_id: st
 # ───── Deliver Movie Files ─────
 async def _deliver_movie_files(update: Update, context: ContextTypes.DEFAULT_TYPE, movie_id: str):
     user_id = update.effective_user.id
+
     if not await is_member_public_group(context, user_id):
         await context.bot.send_message(
             chat_id=user_id,
-            text=f"برای دانلود، لطفاً عضو گروه شوید:\n{PUBLIC_GROUP_LINK}",
+            text=f"برای دانلود، لطفاً عضو گروه شوید:\n{os.environ.get('PUBLIC_GROUP_LINK')}",
             disable_web_page_preview=True
         )
         return
@@ -166,7 +171,7 @@ async def _deliver_movie_files(update: Update, context: ContextTypes.DEFAULT_TYP
 
     warning_msg = await context.bot.send_message(
         chat_id=user_id,
-        text="🛑⚠️ توجه: مدیای ارسال شده پس از 2 دقیقه حذف خواهد شد. ⚠️🛑"
+        text="🛑⚠️ توجه: مدیای ارسال شده پس از 2 دقیقه حذف خواهد شد. لطفا پیام را ذخیره کنید. ⚠️🛑"
     )
     sent_messages.append(warning_msg)
 
@@ -193,7 +198,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.args:
         await _deliver_movie_files(update, context, context.args[0])
         return
-    await update.message.reply_text(f"سلام 👋\nفیلم‌ها رو از گروه عمومی انتخاب کنید.\n{PUBLIC_GROUP_LINK}")
+    await update.message.reply_text(f"سلام 👋\nفیلم‌ها رو از گروه عمومی انتخاب کنید.\n{os.environ.get('PUBLIC_GROUP_LINK')}")
 
 async def download(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.args:
@@ -216,7 +221,6 @@ async def private_group_monitor(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     chat_id = message.chat_id
-    logging.info(f"📩 Message received: {message.to_dict()}")
 
     if message.photo:
         poster_id = message.photo[-1].file_id
@@ -232,16 +236,12 @@ async def private_group_monitor(update: Update, context: ContextTypes.DEFAULT_TY
         asyncio.create_task(draft_timeout(chat_id))
         return
 
-    if (message.video or message.document or message.animation or message.voice) and chat_id in DRAFTS:
+    if (message.video or message.document) and chat_id in DRAFTS:
         draft = DRAFTS[chat_id]
         if message.video:
             draft['files'].append({'type': 'video', 'file_id': message.video.file_id, 'caption': message.caption or ''})
         if message.document:
             draft['files'].append({'type': 'document', 'file_id': message.document.file_id, 'caption': message.caption or ''})
-        if message.animation:
-            draft['files'].append({'type': 'animation', 'file_id': message.animation.file_id, 'caption': message.caption or ''})
-        if message.voice:
-            draft['files'].append({'type': 'voice', 'file_id': message.voice.file_id, 'caption': message.caption or ''})
         draft['episode'] += 1
         return
 
@@ -267,7 +267,7 @@ def main():
     telegram_app.add_handler(CommandHandler("download", download))
     telegram_app.add_handler(CommandHandler("cancel", cancel))
 
-    private_group_filter = filters.Chat(PRIVATE_GROUP_ID)
+    private_group_filter = filters.Chat(PRIVATE_GROUP_ID) & (filters.PHOTO | filters.VIDEO | filters.Document.ALL | filters.Sticker.ALL)
     telegram_app.add_handler(MessageHandler(private_group_filter, private_group_monitor))
 
     Thread(target=run_flask, daemon=True).start()
