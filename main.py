@@ -13,57 +13,50 @@ from telegram.ext import (
     filters,
 )
 import logging
+from dotenv import load_dotenv
+
+# Supabase
 from supabase import create_client, Client
 
-# ───── لاگ‌گیری ─────
-logging.basicConfig(level=logging.INFO)
+# ───── Load Secrets ─────
+load_dotenv()
 
-# ───── تنظیمات ─────
-TOKEN = "8360522775:AAEUbSR_S7_mM7RPPMfkv6yk6WBXPiSy2sY"
-PRIVATE_GROUP_ID = -1001311582958
-PUBLIC_GROUP_ID = -1001081524118
-BOT_LINK = "https://t.me/GoldStarMusicMoviebot"
-ADMIN_ID = 135019937  # آی‌دی خودت
-DB_PATH = "movies.db"  # هنوز برای fallback نگه داشته شده
-os.makedirs("movie_files", exist_ok=True)
+TOKEN = os.environ.get("BOT_TOKEN")
+PRIVATE_GROUP_ID = int(os.environ.get("PRIVATE_GROUP_ID", 0))
+PUBLIC_GROUP_ID = int(os.environ.get("PUBLIC_GROUP_ID", 0))
+BOT_LINK = os.environ.get("BOT_LINK", "")
+ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))
 
-# ───── Supabase ─────
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# ───── Draft ─────
+DB_PATH = "movies.db"
+USER_LIST_FILE = "users.txt"
+os.makedirs("movie_files", exist_ok=True)
+
+# ───── Logging ─────
+logging.basicConfig(level=logging.INFO)
+
+# ───── Draft Storage ─────
 DRAFTS = {}
 
 # ───── Flask ─────
-app = Flask("")
+app = Flask("GoldStarMovieBot")
 
 @app.route("/")
 def home():
     return "✅ GoldStarMovieBot is running!"
 
+@app.route("/health")
+def health():
+    return "OK", 200
+
 def run_flask():
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
 
-# ───── دیتابیس محلی (fallback) ─────
-def init_db():
-    import sqlite3
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute('''
-        CREATE TABLE IF NOT EXISTS movies (
-            movie_id TEXT PRIMARY KEY,
-            poster_file_ids TEXT,
-            description TEXT,
-            is_series INTEGER DEFAULT 0,
-            season INTEGER DEFAULT 0,
-            episode INTEGER DEFAULT 0,
-            files_json TEXT
-        )
-    ''')
-    conn.close()
-
-# ───── Supabase: کاربران ─────
+# ───── Users ─────
 def save_user(user_id: int):
     try:
         supabase.table("users").upsert({"user_id": user_id}).execute()
@@ -77,7 +70,7 @@ async def is_member_public_group(context: ContextTypes.DEFAULT_TYPE, user_id: in
     except Exception:
         return False
 
-# ───── Supabase: فیلم‌ها ─────
+# ───── Movie Storage ─────
 def add_movie(movie_id, poster_file_ids, description, is_series=0, season=0, episode=0, files=None):
     try:
         supabase.table("movies").upsert({
@@ -102,7 +95,7 @@ def get_movie(movie_id):
         print("Error fetching movie:", e)
     return None
 
-# ───── ارسال پوستر به گروه عمومی ─────
+# ───── Send Posters ─────
 async def send_poster_to_public(context: ContextTypes.DEFAULT_TYPE, movie_id: str):
     movie = get_movie(movie_id)
     if not movie:
@@ -124,14 +117,14 @@ async def send_poster_to_public(context: ContextTypes.DEFAULT_TYPE, movie_id: st
         except Exception as e:
             print("Error sending poster:", e)
 
-# ───── ارسال فایل‌ها به کاربر ─────
+# ───── Deliver Movie Files ─────
 async def _deliver_movie_files(update: Update, context: ContextTypes.DEFAULT_TYPE, movie_id: str):
     user_id = update.effective_user.id
 
     if not await is_member_public_group(context, user_id):
         await context.bot.send_message(
             chat_id=user_id,
-            text="برای دانلود، لطفاً عضو گروه شوید:\nhttps://t.me/GoldStarMusic3",
+            text=f"برای دانلود، لطفاً عضو گروه شوید:\n{os.environ.get('PUBLIC_GROUP_LINK')}",
             disable_web_page_preview=True
         )
         return
@@ -177,15 +170,17 @@ async def draft_timeout(chat_id: int, delay: int = 600):
         DRAFTS.pop(chat_id, None)
         print(f"Draft in chat {chat_id} expired due to timeout.")
 
-# ───── دستورات ─────
+# ───── Commands ─────
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_user(update.effective_user.id)
-    reply_text = "سلام 👋\nفیلم‌ها رو از گروه عمومی انتخاب کنید.\n@GoldStarMusic3"
+    reply_text = f"سلام 👋\nفیلم‌ها رو از گروه عمومی انتخاب کنید.\n{os.environ.get('PUBLIC_GROUP_LINK')}"
     if update.effective_user.id == ADMIN_ID:
         reply_text += "\n⚙️ تنظیمات"
+
     if context.args:
         await _deliver_movie_files(update, context, context.args[0])
         return
+
     await update.message.reply_text(reply_text)
 
 async def download(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -202,7 +197,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("❌ Draft فعالی وجود ندارد.")
 
-# ───── مانیتور گروه خصوصی ─────
+# ───── Private Group Monitor ─────
 async def private_group_monitor(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     if not message:
@@ -233,7 +228,7 @@ async def private_group_monitor(update: Update, context: ContextTypes.DEFAULT_TY
         draft['episode'] += 1
         return
 
-    if message.sticker and chat_id in DRAFTS:
+    if chat_id in DRAFTS and (message.sticker or True):
         draft = DRAFTS.pop(chat_id)
         movie_id = str(draft['start_message_id'])
         add_movie(
@@ -247,17 +242,15 @@ async def private_group_monitor(update: Update, context: ContextTypes.DEFAULT_TY
         )
         await send_poster_to_public(context, movie_id)
 
-# ───── اجرای همزمان ─────
+# ───── Main ─────
 def main():
-    init_db()
     Thread(target=run_flask, daemon=True).start()
-
     telegram_app = ApplicationBuilder().token(TOKEN).build()
     telegram_app.add_handler(CommandHandler("start", start))
     telegram_app.add_handler(CommandHandler("download", download))
     telegram_app.add_handler(CommandHandler("cancel", cancel))
 
-    private_group_filter = filters.Chat(PRIVATE_GROUP_ID) & (filters.PHOTO | filters.VIDEO | filters.Document.ALL | filters.Sticker.ALL)
+    private_group_filter = filters.Chat(PRIVATE_GROUP_ID)
     telegram_app.add_handler(MessageHandler(private_group_filter, private_group_monitor))
 
     telegram_app.run_polling(close_loop=False)
