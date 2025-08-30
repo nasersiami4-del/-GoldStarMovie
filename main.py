@@ -1,36 +1,27 @@
 import os
 import json
+import sqlite3
 import asyncio
 from threading import Thread
 from flask import Flask
 from telegram import Update
 from telegram.constants import ParseMode
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    MessageHandler,
-    ContextTypes,
-    filters,
-)
-from supabase import create_client, Client
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
 import logging
 from dotenv import load_dotenv
 
-# ───── Load Env ─────
+# ───── Load Secrets ─────
 load_dotenv()
 TOKEN = os.environ.get("BOT_TOKEN")
 PRIVATE_GROUP_ID = int(os.environ.get("PRIVATE_GROUP_ID", 0))
 PUBLIC_GROUP_ID = int(os.environ.get("PUBLIC_GROUP_ID", 0))
-PUBLIC_GROUP_LINK = os.environ.get("PUBLIC_GROUP_LINK", "")
 BOT_LINK = os.environ.get("BOT_LINK", "")
-SUPABASE_URL = os.environ.get("SUPABASE_URL")
-SUPABASE_KEY = os.environ.get("SUPABASE_ANON_KEY")
+DB_PATH = "movies.db"
+USER_LIST_FILE = "users.txt"
+os.makedirs("movie_files", exist_ok=True)
 
 # ───── Logging ─────
 logging.basicConfig(level=logging.INFO)
-
-# ───── Supabase Client ─────
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # ───── Draft Storage ─────
 DRAFTS = {}
@@ -47,41 +38,85 @@ def health():
     return "OK", 200
 
 def run_flask():
-    port = int(os.environ.get("PORT", 8080))
+    port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
 
-# ───── Supabase Functions ─────
+# ───── Database ─────
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS movies (
+            movie_id TEXT PRIMARY KEY,
+            poster_file_ids TEXT,
+            description TEXT,
+            is_series INTEGER DEFAULT 0,
+            season INTEGER DEFAULT 0,
+            episode INTEGER DEFAULT 0,
+            files_json TEXT
+        )
+    ''')
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        )
+    ''')
+    conn.close()
+
 def add_movie(movie_id, poster_file_ids, description, is_series=0, season=0, episode=0, files_json=None):
-    supabase.table("movies").upsert({
-        "movie_id": movie_id,
-        "poster_file_ids": json.dumps(poster_file_ids),
-        "description": description,
-        "is_series": is_series,
-        "season": season,
-        "episode": episode,
-        "files_json": json.dumps(files_json or [])
-    }).execute()
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute('''
+        INSERT OR REPLACE INTO movies 
+        (movie_id, poster_file_ids, description, is_series, season, episode, files_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    ''', (movie_id, json.dumps(poster_file_ids), description, is_series, season, episode, files_json))
+    conn.commit()
+    conn.close()
 
 def get_movie(movie_id):
-    resp = supabase.table("movies").select("*").eq("movie_id", movie_id).execute()
-    if resp.data:
-        row = resp.data[0]
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.execute("SELECT * FROM movies WHERE movie_id = ?", (movie_id,))
+    row = cur.fetchone()
+    conn.close()
+    if row:
         return {
-            "poster_file_ids": json.loads(row["poster_file_ids"] or "[]"),
-            "description": row.get("description", ""),
-            "is_series": row.get("is_series", 0),
-            "season": row.get("season", 0),
-            "episode": row.get("episode", 0),
-            "files": json.loads(row.get("files_json") or "[]")
+            "poster_file_ids": json.loads(row[1]) if row[1] else [],
+            "description": row[2] or "",
+            "is_series": row[3] or 0,
+            "season": row[4] or 0,
+            "episode": row[5] or 0,
+            "files": json.loads(row[6]) if row[6] else []
         }
     return None
 
-def save_user(user_id):
-    exists = supabase.table("users").select("*").eq("user_id", user_id).execute()
-    if not exists.data:
-        supabase.table("users").insert({"user_id": user_id}).execute()
+def save_setting(key, value):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', (key, value))
+    conn.commit()
+    conn.close()
 
-# ───── Telegram Helpers ─────
+def get_setting(key):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.execute('SELECT value FROM settings WHERE key=?', (key,))
+    row = cur.fetchone()
+    conn.close()
+    return row[0] if row else None
+
+# ───── Users ─────
+def save_user(user_id):
+    try:
+        if not os.path.exists(USER_LIST_FILE):
+            with open(USER_LIST_FILE, "w", encoding="utf-8") as f:
+                f.write(f"{user_id}\n")
+        else:
+            with open(USER_LIST_FILE, "r", encoding="utf-8") as f:
+                lines = f.read().splitlines()
+            if str(user_id) not in lines:
+                with open(USER_LIST_FILE, "a", encoding="utf-8") as f:
+                    f.write(f"{user_id}\n")
+    except Exception as e:
+        print("Error saving user:", e)
+
 async def is_member_public_group(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> bool:
     try:
         member = await context.bot.get_chat_member(PUBLIC_GROUP_ID, user_id)
@@ -89,9 +124,11 @@ async def is_member_public_group(context: ContextTypes.DEFAULT_TYPE, user_id: in
     except Exception:
         return False
 
+# ───── Send Posters ─────
 async def send_poster_to_public(context: ContextTypes.DEFAULT_TYPE, movie_id: str):
     movie = get_movie(movie_id)
     if not movie:
+        print(f"Movie {movie_id} not found!")
         return
     caption_text = movie['description'].strip() or "🎬 GoldStarMovie"
     deep_link = f"{BOT_LINK}?start={movie_id}"
@@ -107,21 +144,20 @@ async def send_poster_to_public(context: ContextTypes.DEFAULT_TYPE, movie_id: st
         except Exception as e:
             print("Error sending poster:", e)
 
+# ───── Deliver Movie Files ─────
 async def _deliver_movie_files(update: Update, context: ContextTypes.DEFAULT_TYPE, movie_id: str):
     user_id = update.effective_user.id
     if not await is_member_public_group(context, user_id):
         await context.bot.send_message(
             chat_id=user_id,
-            text=f"برای دانلود، لطفاً عضو گروه شوید:\n{PUBLIC_GROUP_LINK}",
+            text=f"برای دانلود، لطفاً عضو گروه شوید:\n{get_setting('PUBLIC_GROUP_LINK')}",
             disable_web_page_preview=True
         )
         return
-
     movie = get_movie(movie_id)
     if not movie or not movie.get('files'):
         await context.bot.send_message(chat_id=user_id, text="❌ فایل یافت نشد.")
         return
-
     sent_messages = []
     for f in movie['files']:
         try:
@@ -134,13 +170,11 @@ async def _deliver_movie_files(update: Update, context: ContextTypes.DEFAULT_TYP
             sent_messages.append(sent)
         except Exception as e:
             print("Error sending file:", e)
-
     warning_msg = await context.bot.send_message(
         chat_id=user_id,
         text="🛑⚠️ توجه: مدیای ارسال شده پس از 2 دقیقه حذف خواهد شد. لطفا پیام را ذخیره کنید. ⚠️🛑"
     )
     sent_messages.append(warning_msg)
-
     async def delete_after_delay(chat_id, messages, delay=120):
         await asyncio.sleep(delay)
         for msg in messages:
@@ -148,8 +182,14 @@ async def _deliver_movie_files(update: Update, context: ContextTypes.DEFAULT_TYP
                 await context.bot.delete_message(chat_id=chat_id, message_id=msg.message_id)
             except Exception:
                 continue
-
     asyncio.create_task(delete_after_delay(user_id, sent_messages))
+
+# ───── Draft Timeout ─────
+async def draft_timeout(chat_id: int, delay: int = 600):
+    await asyncio.sleep(delay)
+    if chat_id in DRAFTS:
+        DRAFTS.pop(chat_id, None)
+        print(f"Draft in chat {chat_id} expired due to timeout.")
 
 # ───── Commands ─────
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -157,7 +197,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.args:
         await _deliver_movie_files(update, context, context.args[0])
         return
-    await update.message.reply_text(f"سلام 👋\nفیلم‌ها رو از گروه عمومی انتخاب کنید.\n{PUBLIC_GROUP_LINK}")
+    await update.message.reply_text(f"سلام 👋\nفیلم‌ها رو از گروه عمومی انتخاب کنید.\n{get_setting('PUBLIC_GROUP_LINK')}")
 
 async def download(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.args:
@@ -178,9 +218,7 @@ async def private_group_monitor(update: Update, context: ContextTypes.DEFAULT_TY
     message = update.message
     if not message:
         return
-
     chat_id = message.chat_id
-
     if message.photo:
         poster_id = message.photo[-1].file_id
         DRAFTS[chat_id] = {
@@ -194,7 +232,6 @@ async def private_group_monitor(update: Update, context: ContextTypes.DEFAULT_TY
         }
         asyncio.create_task(draft_timeout(chat_id))
         return
-
     if (message.video or message.document) and chat_id in DRAFTS:
         draft = DRAFTS[chat_id]
         if message.video:
@@ -203,7 +240,6 @@ async def private_group_monitor(update: Update, context: ContextTypes.DEFAULT_TY
             draft['files'].append({'type': 'document', 'file_id': message.document.file_id, 'caption': message.caption or ''})
         draft['episode'] += 1
         return
-
     if message.sticker and chat_id in DRAFTS:
         draft = DRAFTS.pop(chat_id)
         movie_id = str(draft['start_message_id'])
@@ -214,27 +250,19 @@ async def private_group_monitor(update: Update, context: ContextTypes.DEFAULT_TY
             is_series=draft.get('is_series', 0),
             season=draft.get('season', 1),
             episode=draft.get('episode', 0),
-            files_json=draft.get('files', [])
+            files_json=json.dumps(draft.get('files', []), ensure_ascii=False)
         )
         await send_poster_to_public(context, movie_id)
 
-# ───── Draft Timeout ─────
-async def draft_timeout(chat_id: int, delay: int = 600):
-    await asyncio.sleep(delay)
-    if chat_id in DRAFTS:
-        DRAFTS.pop(chat_id, None)
-        print(f"Draft in chat {chat_id} expired due to timeout.")
-
 # ───── Main ─────
 def main():
+    init_db()
     telegram_app = ApplicationBuilder().token(TOKEN).build()
     telegram_app.add_handler(CommandHandler("start", start))
     telegram_app.add_handler(CommandHandler("download", download))
     telegram_app.add_handler(CommandHandler("cancel", cancel))
-
     private_group_filter = filters.Chat(PRIVATE_GROUP_ID) & (filters.PHOTO | filters.VIDEO | filters.Document.ALL | filters.Sticker.ALL)
     telegram_app.add_handler(MessageHandler(private_group_filter, private_group_monitor))
-
     Thread(target=run_flask, daemon=True).start()
     telegram_app.run_polling(close_loop=False)
 
