@@ -216,6 +216,7 @@ async def private_group_monitor(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     chat_id = message.chat_id
+    logging.info(f"📩 Message received: {message.to_dict()}")
 
     if message.photo:
         poster_id = message.photo[-1].file_id
@@ -231,12 +232,16 @@ async def private_group_monitor(update: Update, context: ContextTypes.DEFAULT_TY
         asyncio.create_task(draft_timeout(chat_id))
         return
 
-    if (message.video or message.document) and chat_id in DRAFTS:
+    if (message.video or message.document or message.animation or message.voice) and chat_id in DRAFTS:
         draft = DRAFTS[chat_id]
         if message.video:
             draft['files'].append({'type': 'video', 'file_id': message.video.file_id, 'caption': message.caption or ''})
         if message.document:
             draft['files'].append({'type': 'document', 'file_id': message.document.file_id, 'caption': message.caption or ''})
+        if message.animation:
+            draft['files'].append({'type': 'animation', 'file_id': message.animation.file_id, 'caption': message.caption or ''})
+        if message.voice:
+            draft['files'].append({'type': 'voice', 'file_id': message.voice.file_id, 'caption': message.caption or ''})
         draft['episode'] += 1
         return
 
@@ -262,7 +267,7 @@ def main():
     telegram_app.add_handler(CommandHandler("download", download))
     telegram_app.add_handler(CommandHandler("cancel", cancel))
 
-    private_group_filter = filters.Chat(PRIVATE_GROUP_ID) & (filters.PHOTO | filters.VIDEO | filters.Document.ALL | filters.Sticker.ALL)
+    private_group_filter = filters.Chat(PRIVATE_GROUP_ID)
     telegram_app.add_handler(MessageHandler(private_group_filter, private_group_monitor))
 
     Thread(target=run_flask, daemon=True).start()
