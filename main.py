@@ -1,5 +1,6 @@
 import os
 import json
+import sqlite3
 import asyncio
 from threading import Thread
 from flask import Flask
@@ -14,19 +15,22 @@ from telegram.ext import (
 )
 import logging
 from dotenv import load_dotenv
-from supabase import create_client, Client
 
 # ───── Load Secrets ─────
-load_dotenv()
+# Render Secret Files یا Environment Variables
+env_path = "/etc/secrets/.env"  # اگر Secret File آپلود کردی
+if os.path.exists(env_path):
+    load_dotenv(env_path)
+else:
+    load_dotenv()  # fallback برای local testing
 
 TOKEN = os.environ.get("BOT_TOKEN")
 PRIVATE_GROUP_ID = int(os.environ.get("PRIVATE_GROUP_ID", 0))
 PUBLIC_GROUP_ID = int(os.environ.get("PUBLIC_GROUP_ID", 0))
 BOT_LINK = os.environ.get("BOT_LINK", "")
-ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))
-SUPABASE_URL = os.environ.get("SUPABASE_URL")
-SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+DB_PATH = "movies.db"
+USER_LIST_FILE = "users.txt"
+os.makedirs("movie_files", exist_ok=True)
 
 # ───── Logging ─────
 logging.basicConfig(level=logging.INFO)
@@ -49,10 +53,60 @@ def run_flask():
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
 
+# ───── Database ─────
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS movies (
+            movie_id TEXT PRIMARY KEY,
+            poster_file_ids TEXT,
+            description TEXT,
+            is_series INTEGER DEFAULT 0,
+            season INTEGER DEFAULT 0,
+            episode INTEGER DEFAULT 0,
+            files_json TEXT
+        )
+    ''')
+    conn.close()
+
+def add_movie(movie_id, poster_file_ids, description, is_series=0, season=0, episode=0, files_json=None):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute('''
+        INSERT OR REPLACE INTO movies 
+        (movie_id, poster_file_ids, description, is_series, season, episode, files_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    ''', (movie_id, json.dumps(poster_file_ids), description, is_series, season, episode, files_json))
+    conn.commit()
+    conn.close()
+
+def get_movie(movie_id):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.execute("SELECT * FROM movies WHERE movie_id = ?", (movie_id,))
+    row = cur.fetchone()
+    conn.close()
+    if row:
+        return {
+            "poster_file_ids": json.loads(row[1]) if row[1] else [],
+            "description": row[2] or "",
+            "is_series": row[3] or 0,
+            "season": row[4] or 0,
+            "episode": row[5] or 0,
+            "files": json.loads(row[6]) if row[6] else []
+        }
+    return None
+
 # ───── Users ─────
-def save_user(user_id: int):
+def save_user(user_id):
     try:
-        supabase.table("users").upsert({"user_id": user_id}).execute()
+        if not os.path.exists(USER_LIST_FILE):
+            with open(USER_LIST_FILE, "w", encoding="utf-8") as f:
+                f.write(f"{user_id}\n")
+        else:
+            with open(USER_LIST_FILE, "r", encoding="utf-8") as f:
+                lines = f.read().splitlines()
+            if str(user_id) not in lines:
+                with open(USER_LIST_FILE, "a", encoding="utf-8") as f:
+                    f.write(f"{user_id}\n")
     except Exception as e:
         print("Error saving user:", e)
 
@@ -62,31 +116,6 @@ async def is_member_public_group(context: ContextTypes.DEFAULT_TYPE, user_id: in
         return member.status in ("member", "administrator", "creator")
     except Exception:
         return False
-
-# ───── Movie Storage ─────
-def add_movie(movie_id, poster_file_ids, description, is_series=0, season=0, episode=0, files=None):
-    try:
-        supabase.table("movies").upsert({
-            "movie_id": movie_id,
-            "poster_file_ids": poster_file_ids,
-            "description": description,
-            "is_series": is_series,
-            "season": season,
-            "episode": episode,
-            "files": files or []
-        }).execute()
-    except Exception as e:
-        print("Error adding movie:", e)
-
-def get_movie(movie_id):
-    try:
-        resp = supabase.table("movies").select("*").eq("movie_id", movie_id).execute()
-        data = resp.data
-        if data:
-            return data[0]
-    except Exception as e:
-        print("Error fetching movie:", e)
-    return None
 
 # ───── Send Posters ─────
 async def send_poster_to_public(context: ContextTypes.DEFAULT_TYPE, movie_id: str):
@@ -169,12 +198,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.args:
         await _deliver_movie_files(update, context, context.args[0])
         return
-
-    # Only show settings to admin
-    if update.effective_user.id == ADMIN_ID:
-        await update.message.reply_text(f"سلام 👋\nفیلم‌ها رو از گروه عمومی انتخاب کنید.\n{os.environ.get('PUBLIC_GROUP_LINK')}\n⚙️ تنظیمات")
-    else:
-        await update.message.reply_text(f"سلام 👋\nفیلم‌ها رو از گروه عمومی انتخاب کنید.\n{os.environ.get('PUBLIC_GROUP_LINK')}")
+    await update.message.reply_text(f"سلام 👋\nفیلم‌ها رو از گروه عمومی انتخاب کنید.\n{os.environ.get('PUBLIC_GROUP_LINK')}")
 
 async def download(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.args:
@@ -231,12 +255,13 @@ async def private_group_monitor(update: Update, context: ContextTypes.DEFAULT_TY
             is_series=draft.get('is_series', 0),
             season=draft.get('season', 1),
             episode=draft.get('episode', 0),
-            files=draft.get('files', [])
+            files_json=json.dumps(draft.get('files', []), ensure_ascii=False)
         )
         await send_poster_to_public(context, movie_id)
 
 # ───── Main ─────
 def main():
+    init_db()
     telegram_app = ApplicationBuilder().token(TOKEN).build()
     telegram_app.add_handler(CommandHandler("start", start))
     telegram_app.add_handler(CommandHandler("download", download))
