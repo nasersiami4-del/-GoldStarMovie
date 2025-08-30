@@ -14,15 +14,25 @@ from telegram.ext import (
     filters,
 )
 import logging
+from dotenv import load_dotenv  # ← اضافه شد
+
+# ───── بارگذاری متغیرهای محیطی از فایل .env ─────
+load_dotenv()
 
 # ───── لاگ‌گیری ─────
 logging.basicConfig(level=logging.INFO)
 
-# ───── تنظیمات امن (از Environment Variables) ─────
+# ───── تنظیمات امن ─────
 TOKEN = os.environ.get("BOT_TOKEN")
-PRIVATE_GROUP_ID = int(os.environ.get("PRIVATE_GROUP_ID", "-1001311582958"))
-PUBLIC_GROUP_ID = int(os.environ.get("PUBLIC_GROUP_ID", "-1001081524118"))
-BOT_LINK = os.environ.get("BOT_LINK", "https://t.me/GoldStarMusicMoviebot")
+PRIVATE_GROUP_ID = int(os.environ.get("PRIVATE_GROUP_ID"))
+PUBLIC_GROUP_ID = int(os.environ.get("PUBLIC_GROUP_ID"))
+BOT_LINK = os.environ.get("BOT_LINK")
+ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
+PUBLIC_GROUP_LINK = os.environ.get("PUBLIC_GROUP_LINK")
+PORT = int(os.environ.get("PORT", 8080))
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")
+
 DB_PATH = "movies.db"
 USER_LIST_FILE = "users.txt"
 os.makedirs("movie_files", exist_ok=True)
@@ -38,8 +48,7 @@ def home():
     return "✅ GoldStarMovieBot is running!"
 
 def run_flask():
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=PORT)
 
 # ───── پرینت لینک عمومی ─────
 def print_public_url():
@@ -144,7 +153,7 @@ async def _deliver_movie_files(update: Update, context: ContextTypes.DEFAULT_TYP
     if not await is_member_public_group(context, user_id):
         await context.bot.send_message(
             chat_id=user_id,
-            text="برای دانلود، لطفاً عضو گروه شوید:\nhttps://t.me/GoldStarMusic3",
+            text=f"برای دانلود، لطفاً عضو گروه شوید:\n{PUBLIC_GROUP_LINK}",
             disable_web_page_preview=True
         )
         return
@@ -196,7 +205,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.args:
         await _deliver_movie_files(update, context, context.args[0])
         return
-    await update.message.reply_text("سلام 👋\nفیلم‌ها رو از گروه عمومی انتخاب کنید.\n@GoldStarMusic3")
+    await update.message.reply_text(f"سلام 👋\nفیلم‌ها رو از گروه عمومی انتخاب کنید.\n{PUBLIC_GROUP_LINK}")
 
 async def download(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.args:
@@ -260,7 +269,7 @@ async def private_group_monitor(update: Update, context: ContextTypes.DEFAULT_TY
 # ───── اجرای همزمان ─────
 def main():
     init_db()
-    print_public_url()  # لینک عمومی را هنگام ران شدن چاپ کن
+    print_public_url()
 
     telegram_app = ApplicationBuilder().token(TOKEN).build()
     telegram_app.add_handler(CommandHandler("start", start))
