@@ -10,8 +10,7 @@ from telegram.ext import (
     CommandHandler,
     MessageHandler,
     ContextTypes,
-    filters,
-    JobQueue
+    filters
 )
 import logging
 from dotenv import load_dotenv
@@ -92,8 +91,7 @@ async def send_poster_to_public(context: ContextTypes.DEFAULT_TYPE, movie_id: st
     for i, pid in enumerate(movie['poster_file_ids']):
         try:
             await context.bot.send_photo(chat_id=PUBLIC_GROUP_ID, photo=pid, caption=caption if i==0 else None, parse_mode=ParseMode.HTML)
-        except Exception as e:
-            logging.warning(f"Failed to send poster: {e}")
+        except: pass
 
 # ───── Deliver Movie Files ─────
 async def deliver_movie_files(update: Update, context: ContextTypes.DEFAULT_TYPE, movie_id: str):
@@ -115,15 +113,13 @@ async def deliver_movie_files(update: Update, context: ContextTypes.DEFAULT_TYPE
             else:
                 msg = await context.bot.send_document(chat_id=user_id, document=f['file_id'], caption=f.get('caption',''))
             messages.append(msg)
-        except Exception as e:
-            logging.warning(f"Failed to send file: {e}")
+        except: pass
     warning = await context.bot.send_message(chat_id=user_id, text="🛑⚠️ توجه: مدیای ارسال شده پس از 2 دقیقه حذف خواهد شد. ⚠️🛑")
     messages.append(warning)
     async def delete_after(chat_id, msgs, delay=120):
         await asyncio.sleep(delay)
         for m in msgs:
-            try:
-                await context.bot.delete_message(chat_id=chat_id, message_id=m.message_id)
+            try: await context.bot.delete_message(chat_id=chat_id, message_id=m.message_id)
             except: pass
     asyncio.create_task(delete_after(user_id, messages))
 
@@ -174,14 +170,16 @@ async def draft_timeout(chat_id: int, delay: int = 600):
     await asyncio.sleep(delay)
     DRAFTS.pop(chat_id, None)
 
-# ───── Heartbeat ─────
-async def heartbeat(context: ContextTypes.DEFAULT_TYPE):
-    logging.info("💓 Heartbeat: bot is alive")
+# ───── Heartbeat Loop ─────
+async def heartbeat_loop():
+    while True:
+        logging.info("💓 Heartbeat: bot is alive")
+        await asyncio.sleep(300)
 
 # ───── Main ─────
 def main():
     Thread(target=run_flask, daemon=True).start()
-    
+
     app_builder = ApplicationBuilder().token(TOKEN).build()
 
     # Handlers
@@ -190,9 +188,8 @@ def main():
     app_builder.add_handler(CommandHandler("cancel", cancel))
     app_builder.add_handler(MessageHandler(filters.Chat(PRIVATE_GROUP_ID) & (filters.PHOTO | filters.VIDEO | filters.Document.ALL | filters.Sticker.ALL), private_group_monitor))
 
-    # Heartbeat Job
-    job_queue: JobQueue = app_builder.job_queue
-    job_queue.run_repeating(heartbeat, interval=300, first=10)
+    # Start heartbeat loop
+    asyncio.create_task(heartbeat_loop())
 
     app_builder.run_polling(close_loop=False)
 
