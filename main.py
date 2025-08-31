@@ -1,24 +1,22 @@
 import os
 import json
 import asyncio
-from threading import Thread
-from flask import Flask
-from telegram import Update
+from flask import Flask, request
+from telegram import Update, Bot
 from telegram.constants import ParseMode
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
-    MessageHandler,
     ContextTypes,
+    MessageHandler,
     filters,
 )
 import logging
 from dotenv import load_dotenv
 from supabase import create_client, Client
 
-# ───── بارگذاری متغیرهای محیطی ─────
+# ───── Load Environment ─────
 load_dotenv()
-
 logging.basicConfig(level=logging.INFO)
 
 TOKEN = os.environ.get("BOT_TOKEN")
@@ -32,17 +30,20 @@ SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
-
 DRAFTS = {}
 
+# ───── Flask ─────
 app = Flask("GoldStarMovieBot")
 
-@app.route("/")
+@app.route("/", methods=["GET"])
 def home():
     return "✅ GoldStarMovieBot is running!"
 
-def run_flask():
-    app.run(host="0.0.0.0", port=PORT)
+@app.route(f"/webhook/{TOKEN}", methods=["POST"])
+async def webhook():
+    update = Update.de_json(request.get_json(force=True), bot)
+    await application.update_queue.put(update)
+    return "OK"
 
 # ───── Supabase Functions ─────
 def add_movie_supabase(movie_id, poster_file_ids, description, is_series=0, season=0, episode=0, files_json=None):
@@ -96,13 +97,10 @@ async def is_member_public_group(context: ContextTypes.DEFAULT_TYPE, user_id: in
 async def send_poster_to_public(context: ContextTypes.DEFAULT_TYPE, movie_id: str):
     movie = get_movie_both(movie_id)
     if not movie:
-        print(f"Movie {movie_id} not found!")
         return
-
     caption_text = movie['description'].strip() or "🎬 GoldStarMovie"
     deep_link = f"{BOT_LINK}?start={movie_id}"
     caption_text += f'\n\n📥 <a href="{deep_link}">📥 Download | دانلـــود</a>'
-
     for i, poster_id in enumerate(movie['poster_file_ids']):
         try:
             await context.bot.send_photo(
@@ -118,18 +116,12 @@ async def send_poster_to_public(context: ContextTypes.DEFAULT_TYPE, movie_id: st
 async def _deliver_movie_files(update: Update, context: ContextTypes.DEFAULT_TYPE, movie_id: str):
     user_id = update.effective_user.id
     if not await is_member_public_group(context, user_id):
-        await context.bot.send_message(
-            chat_id=user_id,
-            text=f"برای دانلود، لطفاً عضو گروه شوید:\n{PUBLIC_GROUP_LINK}",
-            disable_web_page_preview=True
-        )
+        await context.bot.send_message(chat_id=user_id, text=f"برای دانلود، لطفاً عضو گروه شوید:\n{PUBLIC_GROUP_LINK}", disable_web_page_preview=True)
         return
-
     movie = get_movie_both(movie_id)
     if not movie or not movie.get('files'):
         await context.bot.send_message(chat_id=user_id, text="❌ فایل یافت نشد.")
         return
-
     sent_messages = []
     for f in movie['files']:
         try:
@@ -142,13 +134,8 @@ async def _deliver_movie_files(update: Update, context: ContextTypes.DEFAULT_TYP
             sent_messages.append(sent)
         except Exception as e:
             print("Error sending file:", e)
-
-    warning_msg = await context.bot.send_message(
-        chat_id=user_id,
-        text="🛑⚠️ توجه: مدیای ارسال شده پس از 2 دقیقه حذف خواهد شد. لطفا پیام را ذخیره کنید. ⚠️🛑"
-    )
+    warning_msg = await context.bot.send_message(chat_id=user_id, text="🛑⚠️ مدیای ارسال شده پس از 2 دقیقه حذف خواهد شد ⚠️🛑")
     sent_messages.append(warning_msg)
-
     async def delete_after_delay(chat_id, messages, delay=120):
         await asyncio.sleep(delay)
         for msg in messages:
@@ -156,7 +143,6 @@ async def _deliver_movie_files(update: Update, context: ContextTypes.DEFAULT_TYP
                 await context.bot.delete_message(chat_id=chat_id, message_id=msg.message_id)
             except Exception:
                 continue
-
     asyncio.create_task(delete_after_delay(user_id, sent_messages))
 
 # ───── Draft Timeout ─────
@@ -180,22 +166,12 @@ async def download(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("❌ فیلم یا سریال پیدا نشد.")
 
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    if chat_id in DRAFTS:
-        DRAFTS.pop(chat_id)
-        await update.message.reply_text("✅ Draft لغو شد.")
-    else:
-        await update.message.reply_text("❌ Draft فعالی وجود ندارد.")
-
 # ───── Private Group Monitor ─────
 async def private_group_monitor(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     if not message:
         return
-
     chat_id = message.chat_id
-
     if message.photo:
         poster_id = message.photo[-1].file_id
         DRAFTS[chat_id] = {
@@ -209,7 +185,6 @@ async def private_group_monitor(update: Update, context: ContextTypes.DEFAULT_TY
         }
         asyncio.create_task(draft_timeout(chat_id))
         return
-
     if (message.video or message.document) and chat_id in DRAFTS:
         draft = DRAFTS[chat_id]
         if message.video:
@@ -218,7 +193,6 @@ async def private_group_monitor(update: Update, context: ContextTypes.DEFAULT_TY
             draft['files'].append({'type': 'document', 'file_id': message.document.file_id, 'caption': message.caption or ''})
         draft['episode'] += 1
         return
-
     if message.sticker and chat_id in DRAFTS:
         draft = DRAFTS.pop(chat_id)
         movie_id = str(draft['start_message_id'])
@@ -233,21 +207,19 @@ async def private_group_monitor(update: Update, context: ContextTypes.DEFAULT_TY
         )
         await send_poster_to_public(context, movie_id)
 
-# ───── Main ─────
-def main():
-    print("✅ Starting GoldStarMovieBot...")
-    telegram_app = ApplicationBuilder().token(TOKEN).build()
-    telegram_app.add_handler(CommandHandler("start", start))
-    telegram_app.add_handler(CommandHandler("download", download))
-    telegram_app.add_handler(CommandHandler("cancel", cancel))
-
-    private_group_filter = filters.Chat(PRIVATE_GROUP_ID) & (
-        filters.PHOTO | filters.VIDEO | filters.Document.ALL | filters.Sticker.ALL
-    )
-    telegram_app.add_handler(MessageHandler(private_group_filter, private_group_monitor))
-
-    Thread(target=run_flask, daemon=True).start()
-    telegram_app.run_polling(close_loop=False)
+# ───── Initialize Bot ─────
+bot = Bot(token=TOKEN)
+application = ApplicationBuilder().bot(bot).build()
+application.add_handler(CommandHandler("start", start))
+application.add_handler(CommandHandler("download", download))
+private_group_filter = filters.Chat(PRIVATE_GROUP_ID) & (filters.PHOTO | filters.VIDEO | filters.Document.ALL | filters.Sticker.ALL)
+application.add_handler(MessageHandler(private_group_filter, private_group_monitor))
 
 if __name__ == "__main__":
-    main()
+    # Set webhook at startup
+    import requests
+    url = f"https://YOUR_RENDER_URL/webhook/{TOKEN}"
+    requests.get(f"https://api.telegram.org/bot{TOKEN}/setWebhook?url={url}")
+    print("✅ Webhook set:", url)
+    # Run Flask for Render
+    app.run(host="0.0.0.0", port=PORT)
