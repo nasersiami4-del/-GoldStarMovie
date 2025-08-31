@@ -1,53 +1,41 @@
 import os
 import json
 import asyncio
-from threading import Thread
-from flask import Flask
-from telegram import Update
+from flask import Flask, request
+from telegram import Update, Bot
 from telegram.constants import ParseMode
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    MessageHandler,
-    ContextTypes,
-    filters,
-)
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
 import logging
 from dotenv import load_dotenv
 from supabase import create_client, Client
 
-# ───── بارگذاری متغیرهای محیطی ─────
+# ───── Load Environment Variables ─────
 load_dotenv()
-
-logging.basicConfig(level=logging.INFO)
 
 TOKEN = os.environ.get("BOT_TOKEN")
 PRIVATE_GROUP_ID = int(os.environ.get("PRIVATE_GROUP_ID"))
 PUBLIC_GROUP_ID = int(os.environ.get("PUBLIC_GROUP_ID"))
 BOT_LINK = os.environ.get("BOT_LINK")
-ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
 PUBLIC_GROUP_LINK = os.environ.get("PUBLIC_GROUP_LINK")
 PORT = int(os.environ.get("PORT", 8080))
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
-
 DRAFTS = {}
 
-# ───── Flask ─────
 app = Flask("GoldStarMovieBot")
 
 @app.route("/")
 def home():
     return "✅ GoldStarMovieBot is running!"
 
-@app.route("/health")
-def health():
-    return "OK", 200
-
-def run_flask():
-    app.run(host="0.0.0.0", port=PORT)
+# Webhook endpoint
+@app.route(f"/webhook/{TOKEN}", methods=["POST"])
+def webhook():
+    update = Update.de_json(request.get_json(force=True), bot)
+    asyncio.run(application.process_update(update))
+    return "OK"
 
 # ───── Supabase Functions ─────
 def add_movie_supabase(movie_id, poster_file_ids, description, is_series=0, season=0, episode=0, files_json=None):
@@ -101,7 +89,6 @@ async def is_member_public_group(context: ContextTypes.DEFAULT_TYPE, user_id: in
 async def send_poster_to_public(context: ContextTypes.DEFAULT_TYPE, movie_id: str):
     movie = get_movie_both(movie_id)
     if not movie:
-        print(f"Movie {movie_id} not found!")
         return
 
     caption_text = movie['description'].strip() or "🎬 GoldStarMovie"
@@ -169,7 +156,6 @@ async def draft_timeout(chat_id: int, delay: int = 600):
     await asyncio.sleep(delay)
     if chat_id in DRAFTS:
         DRAFTS.pop(chat_id, None)
-        print(f"Draft in chat {chat_id} expired due to timeout.")
 
 # ───── Commands ─────
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -181,7 +167,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def download(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.args:
-        await _deliver_movie_files(update, context.args[0])
+        await _deliver_movie_files(update, context, context.args[0])
     else:
         await update.message.reply_text("❌ فیلم یا سریال پیدا نشد.")
 
@@ -239,20 +225,22 @@ async def private_group_monitor(update: Update, context: ContextTypes.DEFAULT_TY
         await send_poster_to_public(context, movie_id)
 
 # ───── Main ─────
-def main():
-    print("✅ Starting GoldStarMovieBot...")
-    telegram_app = ApplicationBuilder().token(TOKEN).build()
-    telegram_app.add_handler(CommandHandler("start", start))
-    telegram_app.add_handler(CommandHandler("download", download))
-    telegram_app.add_handler(CommandHandler("cancel", cancel))
+if __name__ == "__main__":
+    bot = Bot(TOKEN)
+    application = ApplicationBuilder().token(TOKEN).build()
+
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("download", download))
+    application.add_handler(CommandHandler("cancel", cancel))
 
     private_group_filter = filters.Chat(PRIVATE_GROUP_ID) & (
         filters.PHOTO | filters.VIDEO | filters.Document.ALL | filters.Sticker.ALL
     )
-    telegram_app.add_handler(MessageHandler(private_group_filter, private_group_monitor))
+    application.add_handler(MessageHandler(private_group_filter, private_group_monitor))
 
-    Thread(target=run_flask, daemon=True).start()
-    telegram_app.run_polling(close_loop=False)
+    # Set webhook
+    RENDER_URL = os.environ.get("RENDER_URL")  # https://yourproject.onrender.com
+    bot.delete_webhook()
+    bot.set_webhook(f"{RENDER_URL}/webhook/{TOKEN}")
 
-if __name__ == "__main__":
-    main()
+    app.run(host="0.0.0.0", port=PORT)
