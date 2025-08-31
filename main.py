@@ -2,7 +2,7 @@ import os
 import json
 import asyncio
 from threading import Thread
-from flask import Flask
+from flask import Flask, request
 from telegram import Update
 from telegram.constants import ParseMode
 from telegram.ext import (
@@ -16,7 +16,7 @@ import logging
 from dotenv import load_dotenv
 from supabase import create_client, Client
 
-# ───── بارگذاری متغیرهای محیطی ─────
+# ───── Load environment variables ─────
 load_dotenv()
 
 logging.basicConfig(level=logging.INFO)
@@ -32,22 +32,30 @@ SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
-DRAFTS = {}
 
+DRAFTS = {}
 app = Flask("GoldStarMovieBot")
 
+# ───── Flask routes ─────
 @app.route("/")
 def home():
     return "✅ GoldStarMovieBot is running!"
 
 @app.route("/health")
 def health():
-    return "OK", 200  # مسیر سلامت برای UptimeRobot
+    return "OK", 200
+
+@app.route("/webhook", methods=["POST"])
+async def webhook():
+    data = await request.get_json()
+    update = Update.de_json(data, telegram_app.bot)
+    await telegram_app.update_queue.put(update)
+    return "ok"
 
 def run_flask():
     app.run(host="0.0.0.0", port=PORT)
 
-# ───── Supabase Functions ─────
+# ───── Supabase functions ─────
 def add_movie_supabase(movie_id, poster_file_ids, description, is_series=0, season=0, episode=0, files_json=None):
     supabase.table("movies").upsert({
         "movie_id": movie_id,
@@ -77,9 +85,9 @@ def get_movie_supabase(movie_id):
 def save_user_supabase(user_id):
     supabase.table("users").upsert({"user_id": str(user_id)}).execute()
 
-# ───── Combined Functions ─────
-def add_movie_both(movie_id, poster_file_ids, description, is_series=0, season=0, episode=0, files_json=None):
-    add_movie_supabase(movie_id, poster_file_ids, description, is_series, season, episode, files_json)
+# ───── Combined functions ─────
+def add_movie_both(*args, **kwargs):
+    add_movie_supabase(*args, **kwargs)
 
 def get_movie_both(movie_id):
     return get_movie_supabase(movie_id)
@@ -87,7 +95,7 @@ def get_movie_both(movie_id):
 def save_user_both(user_id):
     save_user_supabase(user_id)
 
-# ───── Membership Check ─────
+# ───── Membership check ─────
 async def is_member_public_group(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> bool:
     try:
         member = await context.bot.get_chat_member(PUBLIC_GROUP_ID, user_id)
@@ -95,7 +103,7 @@ async def is_member_public_group(context: ContextTypes.DEFAULT_TYPE, user_id: in
     except Exception:
         return False
 
-# ───── Send Posters ─────
+# ───── Send posters ─────
 async def send_poster_to_public(context: ContextTypes.DEFAULT_TYPE, movie_id: str):
     movie = get_movie_both(movie_id)
     if not movie:
@@ -117,7 +125,7 @@ async def send_poster_to_public(context: ContextTypes.DEFAULT_TYPE, movie_id: st
         except Exception as e:
             print("Error sending poster:", e)
 
-# ───── Deliver Movie Files ─────
+# ───── Deliver movie files ─────
 async def _deliver_movie_files(update: Update, context: ContextTypes.DEFAULT_TYPE, movie_id: str):
     user_id = update.effective_user.id
     if not await is_member_public_group(context, user_id):
@@ -130,7 +138,7 @@ async def _deliver_movie_files(update: Update, context: ContextTypes.DEFAULT_TYP
 
     movie = get_movie_both(movie_id)
     if not movie or not movie.get('files'):
-        await update.message.reply_text("❌ فایل یافت نشد.")
+        await context.bot.send_message(chat_id=user_id, text="❌ فایل یافت نشد.")
         return
 
     sent_messages = []
@@ -162,7 +170,7 @@ async def _deliver_movie_files(update: Update, context: ContextTypes.DEFAULT_TYP
 
     asyncio.create_task(delete_after_delay(user_id, sent_messages))
 
-# ───── Draft Timeout ─────
+# ───── Draft timeout ─────
 async def draft_timeout(chat_id: int, delay: int = 600):
     await asyncio.sleep(delay)
     if chat_id in DRAFTS:
@@ -191,7 +199,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("❌ Draft فعالی وجود ندارد.")
 
-# ───── Private Group Monitor ─────
+# ───── Private group monitor ─────
 async def private_group_monitor(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     if not message:
@@ -238,7 +246,9 @@ async def private_group_monitor(update: Update, context: ContextTypes.DEFAULT_TY
 
 # ───── Main ─────
 def main():
+    global telegram_app
     print("✅ Starting GoldStarMovieBot...")
+
     telegram_app = ApplicationBuilder().token(TOKEN).build()
     telegram_app.add_handler(CommandHandler("start", start))
     telegram_app.add_handler(CommandHandler("download", download))
@@ -250,7 +260,12 @@ def main():
     telegram_app.add_handler(MessageHandler(private_group_filter, private_group_monitor))
 
     Thread(target=run_flask, daemon=True).start()
-    telegram_app.run_polling(close_loop=False)
+
+    telegram_app.run_webhook(
+        listen="0.0.0.0",
+        port=PORT,
+        webhook_path="/webhook"
+    )
 
 if __name__ == "__main__":
     main()
