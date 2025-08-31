@@ -2,7 +2,6 @@ import os
 import json
 import sqlite3
 import asyncio
-import time
 from threading import Thread
 from flask import Flask
 from telegram import Update
@@ -18,12 +17,13 @@ import logging
 from dotenv import load_dotenv
 from supabase import create_client, Client
 
-# ───── بارگذاری متغیرهای محیطی ─────
+# ───── بارگذاری متغیرهای محیطی از فایل .env ─────
 load_dotenv()
 
+# ───── لاگ‌گیری ─────
 logging.basicConfig(level=logging.INFO)
 
-# ───── تنظیمات ─────
+# ───── تنظیمات امن ─────
 TOKEN = os.environ.get("BOT_TOKEN")
 PRIVATE_GROUP_ID = int(os.environ.get("PRIVATE_GROUP_ID"))
 PUBLIC_GROUP_ID = int(os.environ.get("PUBLIC_GROUP_ID"))
@@ -38,12 +38,11 @@ SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
 DB_PATH = "movies.db"
+USER_LIST_FILE = "users.txt"
 os.makedirs("movie_files", exist_ok=True)
 
-# ───── Draft و کش داخلی ─────
+# ───── Draft ─────
 DRAFTS = {}
-MOVIE_CACHE = {}  # {movie_id: {"data": movie_data, "expires_at": timestamp}}
-CACHE_TTL = 600
 
 # ───── Flask ─────
 app = Flask("")
@@ -111,7 +110,7 @@ def save_user(user_id):
     except Exception as e:
         print("Error saving user:", e)
 
-# ───── Supabase ─────
+# ───── دیتابیس Supabase ─────
 def add_movie_supabase(movie_id, poster_file_ids, description, is_series=0, season=0, episode=0, files_json=None):
     supabase.table("movies").upsert({
         "movie_id": movie_id,
@@ -141,26 +140,22 @@ def get_movie_supabase(movie_id):
 def save_user_supabase(user_id):
     supabase.table("users").upsert({"user_id": str(user_id)}).execute()
 
-# ───── فانکشن ترکیبی ─────
+# ───── فانکشن‌های ترکیبی برای استفاده همزمان ─────
 def add_movie_both(movie_id, poster_file_ids, description, is_series=0, season=0, episode=0, files_json=None):
     add_movie(movie_id, poster_file_ids, description, is_series, season, episode, files_json)
     add_movie_supabase(movie_id, poster_file_ids, description, is_series, season, episode, files_json)
 
 def get_movie_both(movie_id):
-    now = time.time()
-    cached = MOVIE_CACHE.get(movie_id)
-    if cached and cached["expires_at"] > now:
-        return cached["data"]
-    movie = get_movie(movie_id) or get_movie_supabase(movie_id)
+    movie = get_movie(movie_id)
     if movie:
-        MOVIE_CACHE[movie_id] = {"data": movie, "expires_at": now + CACHE_TTL}
-    return movie
+        return movie
+    return get_movie_supabase(movie_id)
 
 def save_user_both(user_id):
     save_user(user_id)
     save_user_supabase(user_id)
 
-# ───── مدیریت گروه و ارسال فایل‌ها ─────
+# ───── مدیریت گروه و فایل‌ها ─────
 async def is_member_public_group(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> bool:
     try:
         member = await context.bot.get_chat_member(PUBLIC_GROUP_ID, user_id)
@@ -236,7 +231,9 @@ async def _deliver_movie_files(update: Update, context: ContextTypes.DEFAULT_TYP
 # ───── Draft Timeout ─────
 async def draft_timeout(chat_id: int, delay: int = 600):
     await asyncio.sleep(delay)
-    DRAFTS.pop(chat_id, None)
+    if chat_id in DRAFTS:
+        DRAFTS.pop(chat_id, None)
+        print(f"Draft in chat {chat_id} expired due to timeout.")
 
 # ───── دستورات ─────
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -305,7 +302,7 @@ async def private_group_monitor(update: Update, context: ContextTypes.DEFAULT_TY
         )
         await send_poster_to_public(context, movie_id)
 
-# ───── اجرای ربات ─────
+# ───── اجرای همزمان ─────
 def main():
     init_db()
     telegram_app = ApplicationBuilder().token(TOKEN).build()
