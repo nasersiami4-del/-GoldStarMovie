@@ -170,15 +170,16 @@ async def draft_timeout(chat_id: int, delay: int = 600):
     await asyncio.sleep(delay)
     DRAFTS.pop(chat_id, None)
 
-# ───── Heartbeat Loop ─────
+# ───── Heartbeat ─────
 async def heartbeat_loop():
     while True:
         logging.info("💓 Heartbeat: bot is alive")
         await asyncio.sleep(300)
 
 # ───── Main ─────
-def main():
-    Thread(target=run_flask, daemon=True).start()
+async def main_async():
+    app_thread = Thread(target=run_flask, daemon=True)
+    app_thread.start()
 
     app_builder = ApplicationBuilder().token(TOKEN).build()
 
@@ -188,10 +189,10 @@ def main():
     app_builder.add_handler(CommandHandler("cancel", cancel))
     app_builder.add_handler(MessageHandler(filters.Chat(PRIVATE_GROUP_ID) & (filters.PHOTO | filters.VIDEO | filters.Document.ALL | filters.Sticker.ALL), private_group_monitor))
 
-    # Start heartbeat loop
+    # Heartbeat loop
     asyncio.create_task(heartbeat_loop())
 
-    app_builder.run_polling(close_loop=False)
+    await app_builder.run_polling(close_loop=False)
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main_async())
