@@ -32,7 +32,6 @@ SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
-
 DRAFTS = {}
 
 app = Flask("GoldStarMovieBot")
@@ -40,6 +39,10 @@ app = Flask("GoldStarMovieBot")
 @app.route("/")
 def home():
     return "✅ GoldStarMovieBot is running!"
+
+@app.route("/health")
+def health():
+    return "OK", 200  # مسیر سلامت برای UptimeRobot
 
 def run_flask():
     app.run(host="0.0.0.0", port=PORT)
@@ -127,7 +130,7 @@ async def _deliver_movie_files(update: Update, context: ContextTypes.DEFAULT_TYP
 
     movie = get_movie_both(movie_id)
     if not movie or not movie.get('files'):
-        await context.bot.send_message(chat_id=user_id, text="❌ فایل یافت نشد.")
+        await update.message.reply_text("❌ فایل یافت نشد.")
         return
 
     sent_messages = []
