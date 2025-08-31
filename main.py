@@ -1,6 +1,7 @@
 import os
 import json
 import asyncio
+from threading import Thread
 from flask import Flask
 from telegram import Update
 from telegram.constants import ParseMode
@@ -14,34 +15,32 @@ from telegram.ext import (
 import logging
 from dotenv import load_dotenv
 from supabase import create_client, Client
+import httpx
 
 # ───── بارگذاری متغیرهای محیطی ─────
 load_dotenv()
+
 logging.basicConfig(level=logging.INFO)
 
 TOKEN = os.environ.get("BOT_TOKEN")
 PRIVATE_GROUP_ID = int(os.environ.get("PRIVATE_GROUP_ID"))
 PUBLIC_GROUP_ID = int(os.environ.get("PUBLIC_GROUP_ID"))
 BOT_LINK = os.environ.get("BOT_LINK")
+ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
 PUBLIC_GROUP_LINK = os.environ.get("PUBLIC_GROUP_LINK")
 PORT = int(os.environ.get("PORT", 8080))
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")
-RENDER_URL = os.environ.get("RENDER_URL")
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+
 DRAFTS = {}
 
-# ───── Flask ─────
 app = Flask("GoldStarMovieBot")
 
 @app.route("/")
 def home():
     return "✅ GoldStarMovieBot is running!"
-
-@app.route("/health")
-def health():
-    return "OK"
 
 def run_flask():
     app.run(host="0.0.0.0", port=PORT)
@@ -114,7 +113,7 @@ async def send_poster_to_public(context: ContextTypes.DEFAULT_TYPE, movie_id: st
                 parse_mode=ParseMode.HTML
             )
         except Exception as e:
-            print("Error sending poster:", e)
+            logging.error(f"Error sending poster: {e}")
 
 # ───── Deliver Movie Files ─────
 async def _deliver_movie_files(update: Update, context: ContextTypes.DEFAULT_TYPE, movie_id: str):
@@ -143,7 +142,7 @@ async def _deliver_movie_files(update: Update, context: ContextTypes.DEFAULT_TYP
                 sent = await context.bot.send_document(chat_id=user_id, document=f['file_id'], caption=f.get('caption', ''))
             sent_messages.append(sent)
         except Exception as e:
-            print("Error sending file:", e)
+            logging.error(f"Error sending file: {e}")
 
     warning_msg = await context.bot.send_message(
         chat_id=user_id,
@@ -166,7 +165,7 @@ async def draft_timeout(chat_id: int, delay: int = 600):
     await asyncio.sleep(delay)
     if chat_id in DRAFTS:
         DRAFTS.pop(chat_id, None)
-        print(f"Draft in chat {chat_id} expired due to timeout.")
+        logging.info(f"Draft in chat {chat_id} expired due to timeout.")
 
 # ───── Commands ─────
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -178,7 +177,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def download(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.args:
-        await _deliver_movie_files(update, context.args[0])
+        await _deliver_movie_files(update, context, context.args[0])
     else:
         await update.message.reply_text("❌ فیلم یا سریال پیدا نشد.")
 
@@ -235,9 +234,21 @@ async def private_group_monitor(update: Update, context: ContextTypes.DEFAULT_TY
         )
         await send_poster_to_public(context, movie_id)
 
+# ───── Heartbeat داخلی برای نگه داشتن ربات زنده ─────
+async def heartbeat():
+    while True:
+        try:
+            url = f"http://localhost:{PORT}/"
+            async with httpx.AsyncClient() as client:
+                await client.get(url)
+            logging.info("✅ Heartbeat sent!")
+        except Exception as e:
+            logging.error(f"Heartbeat error: {e}")
+        await asyncio.sleep(10 * 60)  # هر 10 دقیقه یکبار
+
 # ───── Main ─────
 def main():
-    print("✅ Starting GoldStarMovieBot...")
+    logging.info("✅ Starting GoldStarMovieBot...")
     telegram_app = ApplicationBuilder().token(TOKEN).build()
     telegram_app.add_handler(CommandHandler("start", start))
     telegram_app.add_handler(CommandHandler("download", download))
@@ -248,7 +259,13 @@ def main():
     )
     telegram_app.add_handler(MessageHandler(private_group_filter, private_group_monitor))
 
+    # اجرای Flask در Thread جدا
     Thread(target=run_flask, daemon=True).start()
+
+    # اجرای Heartbeat داخلی
+    asyncio.create_task(heartbeat())
+
+    # اجرای ربات
     telegram_app.run_polling(close_loop=False)
 
 if __name__ == "__main__":
