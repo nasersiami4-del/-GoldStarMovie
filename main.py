@@ -100,9 +100,8 @@ def save_user_both(user_id):
 # ───── Membership Check ─────
 async def is_member_all_groups(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> bool:
     links = get_group_links()
-    if not links:  # اگر لینکی ثبت نشده باشد → بدون چک
+    if not links:
         return True
-
     for row in links:
         try:
             member = await context.bot.get_chat_member(PUBLIC_GROUP_ID, user_id)
@@ -112,7 +111,7 @@ async def is_member_all_groups(context: ContextTypes.DEFAULT_TYPE, user_id: int)
             return False
     return True
 
-# ───── Send Posters ─────
+# ───── Send Posters (با لینک متن ساده) ─────
 async def send_poster_to_public(context: ContextTypes.DEFAULT_TYPE, movie_id: str):
     movie = get_movie_both(movie_id)
     if not movie:
@@ -129,7 +128,7 @@ async def send_poster_to_public(context: ContextTypes.DEFAULT_TYPE, movie_id: st
                 chat_id=PUBLIC_GROUP_ID,
                 photo=poster_id,
                 caption=caption_text if i == 0 else None,
-                parse_mode=ParseMode.HTML
+                parse_mode=ParseMode.MARKDOWN  # مهم: متن ساده و لینک قابل کلیک
             )
         except Exception as e:
             print("Error sending poster:", e)
