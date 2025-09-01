@@ -18,6 +18,7 @@ from supabase import create_client, Client
 
 # ───── بارگذاری متغیرهای محیطی ─────
 load_dotenv()
+
 logging.basicConfig(level=logging.INFO)
 
 TOKEN = os.environ.get("BOT_TOKEN")
@@ -75,30 +76,63 @@ def get_movie_supabase(movie_id):
 def save_user_supabase(user_id):
     supabase.table("users").upsert({"user_id": str(user_id)}).execute()
 
-# ───── Membership Check ─────
-async def is_member_all_groups(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> bool:
-    links = supabase.table("group_links").select("chat_id").execute().data
-    if not links:
-        return True
-    for row in links:
-        chat_id = row["chat_id"]
+# ───── Supabase: Group Links ─────
+def add_group_link(link: str, chat_id: int):
+    supabase.table("group_links").insert({"link": link, "chat_id": chat_id}).execute()
+
+def get_group_links() -> list:
+    res = supabase.table("group_links").select("*").execute()
+    return res.data or []
+
+def remove_group_link(link_id: int):
+    supabase.table("group_links").delete().eq("id", link_id).execute()
+
+# ───── Combined Functions ─────
+def add_movie_both(movie_id, poster_file_ids, description, is_series=0, season=0, episode=0, files_json=None):
+    add_movie_supabase(movie_id, poster_file_ids, description, is_series, season, episode, files_json)
+
+def get_movie_both(movie_id):
+    return get_movie_supabase(movie_id)
+
+def save_user_both(user_id):
+    save_user_supabase(user_id)
+
+# ───── Membership Check & Buttons ─────
+async def send_membership_request(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int):
+    links = get_group_links()
+    buttons = []
+    all_member = True
+    for idx, row in enumerate(links, start=1):
         try:
-            member = await context.bot.get_chat_member(chat_id, user_id)
+            member = await context.bot.get_chat_member(row['chat_id'], user_id)
             if member.status not in ("member", "administrator", "creator"):
-                return False
+                buttons.append([InlineKeyboardButton(f"عضویت در گروه {idx}", url=row['link'])])
+                all_member = False
         except Exception:
-            return False
-    return True
+            buttons.append([InlineKeyboardButton(f"عضویت در گروه {idx}", url=row['link'])])
+            all_member = False
+
+    if all_member:
+        return True  # کاربر عضو همه گروه‌ها هست
+
+    keyboard = InlineKeyboardMarkup(buttons)
+    await update.message.reply_text(
+        "برای دانلود، لطفاً عضو گروه‌های زیر شوید:",
+        reply_markup=keyboard
+    )
+    return False
 
 # ───── Send Posters ─────
 async def send_poster_to_public(context: ContextTypes.DEFAULT_TYPE, movie_id: str):
-    movie = get_movie_supabase(movie_id)
+    movie = get_movie_both(movie_id)
     if not movie:
         print(f"Movie {movie_id} not found!")
         return
+
     caption_text = movie['description'].strip() or "🎬 GoldStarMovie"
     deep_link = f"{BOT_LINK}?start={movie_id}"
     caption_text += f'\n\n📥 <a href="{deep_link}">📥 Download | دانلـــود</a>'
+
     for i, poster_id in enumerate(movie['poster_file_ids']):
         try:
             await context.bot.send_photo(
@@ -113,17 +147,11 @@ async def send_poster_to_public(context: ContextTypes.DEFAULT_TYPE, movie_id: st
 # ───── Deliver Movie Files ─────
 async def _deliver_movie_files(update: Update, context: ContextTypes.DEFAULT_TYPE, movie_id: str):
     user_id = update.effective_user.id
-    if not await is_member_all_groups(context, user_id):
-        links = supabase.table("group_links").select("link").execute().data
-        buttons = [[InlineKeyboardButton(f"عضویت در گروه {i+1}", url=row["link"])] for i, row in enumerate(links)]
-        await context.bot.send_message(
-            chat_id=user_id,
-            text="برای دانلود، لطفاً عضو همه گروه‌ها شوید:",
-            reply_markup=InlineKeyboardMarkup(buttons)
-        )
-        return
+    all_member = await send_membership_request(update, context, user_id)
+    if not all_member:
+        return  # اگر هنوز عضو همه گروه‌ها نیست، فایل ارسال نشود
 
-    movie = get_movie_supabase(movie_id)
+    movie = get_movie_both(movie_id)
     if not movie or not movie.get('files'):
         await update.message.reply_text("❌ فایل یافت نشد.")
         return
@@ -166,15 +194,17 @@ async def draft_timeout(chat_id: int, delay: int = 600):
 
 # ───── Commands ─────
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    save_user_supabase(update.effective_user.id)
+    save_user_both(update.effective_user.id)
     if context.args:
         await _deliver_movie_files(update, context, context.args[0])
         return
-    await update.message.reply_text(f"سلام 👋\nبه GoldStarMovieBot خوش آمدید!\n🎬 اینجا می‌تونید جدیدترین فیلم‌ها و سریال‌ها رو ببینید و دانلود کنید.")
+    await update.message.reply_text(
+        f"سلام 👋\nبه GoldStarMovieBot خوش آمدید!\n🎬 اینجا می‌تونید جدیدترین فیلم‌ها و سریال‌ها رو ببینید و دانلود کنید."
+    )
 
 async def download(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.args:
-        await _deliver_movie_files(update, context, context.args[0])
+        await _deliver_movie_files(update, context.args[0])
     else:
         await update.message.reply_text("❌ فیلم یا سریال پیدا نشد.")
 
@@ -190,27 +220,25 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def addlink(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return await update.message.reply_text("⛔ شما دسترسی ندارید.")
-    if not context.args:
-        return await update.message.reply_text("❌ لینک را وارد کنید.\nمثال: /addlink https://t.me/xxxx")
-    
+    if len(context.args) < 2:
+        return await update.message.reply_text("❌ لطفاً لینک و chat_id وارد کنید.\nمثال: /addlink https://t.me/xxxx -1001234567890")
     link = context.args[0]
     try:
-        chat = await context.bot.get_chat(link)
-        chat_id = chat.id
-        supabase.table("group_links").insert({"link": link, "chat_id": chat_id}).execute()
-        await update.message.reply_text(f"✅ لینک اضافه شد و chat_id ذخیره شد:\n{link}")
-    except Exception as e:
-        await update.message.reply_text(f"❌ خطا در گرفتن chat_id گروه: {e}")
+        chat_id = int(context.args[1])
+        add_group_link(link, chat_id)
+        await update.message.reply_text(f"✅ لینک اضافه شد:\n{link}")
+    except ValueError:
+        await update.message.reply_text("❌ chat_id باید عدد باشد.")
 
 async def listlinks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return await update.message.reply_text("⛔ شما دسترسی ندارید.")
-    links = supabase.table("group_links").select("id, link").execute().data
+    links = get_group_links()
     if not links:
         return await update.message.reply_text("⚠️ هیچ لینکی ثبت نشده است.")
     text = "🔗 لینک‌های ثبت‌شده:\n\n"
     for row in links:
-        text += f"🆔 {row['id']} → {row['link']}\n"
+        text += f"🆔 {row['id']} → {row['link']} (chat_id: {row['chat_id']})\n"
     await update.message.reply_text(text)
 
 async def removelink(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -220,7 +248,7 @@ async def removelink(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await update.message.reply_text("❌ لطفاً ID لینک را وارد کنید.\n(با دستور /listlinks لیست را ببینید)")
     try:
         link_id = int(context.args[0])
-        supabase.table("group_links").delete().eq("id", link_id).execute()
+        remove_group_link(link_id)
         await update.message.reply_text(f"✅ لینک با ID {link_id} حذف شد.")
     except ValueError:
         await update.message.reply_text("❌ ID باید عدد باشد.")
@@ -230,7 +258,9 @@ async def private_group_monitor(update: Update, context: ContextTypes.DEFAULT_TY
     message = update.message
     if not message:
         return
+
     chat_id = message.chat_id
+
     if message.photo:
         poster_id = message.photo[-1].file_id
         DRAFTS[chat_id] = {
@@ -244,6 +274,7 @@ async def private_group_monitor(update: Update, context: ContextTypes.DEFAULT_TY
         }
         asyncio.create_task(draft_timeout(chat_id))
         return
+
     if (message.video or message.document) and chat_id in DRAFTS:
         draft = DRAFTS[chat_id]
         if message.video:
@@ -252,10 +283,11 @@ async def private_group_monitor(update: Update, context: ContextTypes.DEFAULT_TY
             draft['files'].append({'type': 'document', 'file_id': message.document.file_id, 'caption': message.caption or ''})
         draft['episode'] += 1
         return
+
     if message.sticker and chat_id in DRAFTS:
         draft = DRAFTS.pop(chat_id)
         movie_id = str(draft['start_message_id'])
-        add_movie_supabase(
+        add_movie_both(
             movie_id,
             poster_file_ids=draft.get('poster_file_ids', []),
             description=draft.get('description', ''),
