@@ -3,7 +3,7 @@ import json
 import asyncio
 from threading import Thread
 from flask import Flask
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update
 from telegram.constants import ParseMode
 from telegram.ext import (
     ApplicationBuilder,
@@ -26,7 +26,6 @@ PRIVATE_GROUP_ID = int(os.environ.get("PRIVATE_GROUP_ID"))
 PUBLIC_GROUP_ID = int(os.environ.get("PUBLIC_GROUP_ID"))
 BOT_LINK = os.environ.get("BOT_LINK")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
-PUBLIC_GROUP_LINK = os.environ.get("PUBLIC_GROUP_LINK")
 PORT = int(os.environ.get("PORT", 8080))
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")
@@ -42,7 +41,7 @@ def home():
 
 @app.route("/health")
 def health():
-    return "OK", 200
+    return "OK", 200  # مسیر سلامت برای UptimeRobot
 
 def run_flask():
     app.run(host="0.0.0.0", port=PORT)
@@ -81,7 +80,7 @@ def add_group_link(link: str):
     supabase.table("group_links").insert({"link": link}).execute()
 
 def get_group_links() -> list:
-    res = supabase.table("group_links").select("id, link").execute()
+    res = supabase.table("group_links").select("id,link").execute()
     return res.data or []
 
 def remove_group_link(link_id: int):
@@ -97,14 +96,15 @@ def get_movie_both(movie_id):
 def save_user_both(user_id):
     save_user_supabase(user_id)
 
-# ───── Membership Check ─────
+# ───── Membership Check for All Groups ─────
 async def is_member_all_groups(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> bool:
-    links = get_group_links()
-    if not links:
+    links = get_group_links()  # لینک‌ها را از Supabase می‌گیریم
+    if not links:  # اگر لینک ثبت نشده، نیازی به چک نیست
         return True
     for row in links:
         try:
-            member = await context.bot.get_chat_member(PUBLIC_GROUP_ID, user_id)
+            chat = row['link']  # این می‌تواند @username یا chat_id باشد
+            member = await context.bot.get_chat_member(chat, user_id)
             if member.status not in ("member", "administrator", "creator"):
                 return False
         except Exception:
@@ -138,23 +138,15 @@ async def _deliver_movie_files(update: Update, context: ContextTypes.DEFAULT_TYP
     user_id = update.effective_user.id
     if not await is_member_all_groups(context, user_id):
         links = get_group_links()
-        if links:
-            keyboard = [
-                [InlineKeyboardButton(text=f"عضویت در گروه {idx+1}", url=row['link'])]
-                for idx, row in enumerate(links)
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            await context.bot.send_message(
-                chat_id=user_id,
-                text="برای دانلود، لطفاً عضو همه گروه‌ها شوید:",
-                reply_markup=reply_markup
-            )
-        else:
-            await context.bot.send_message(
-                chat_id=user_id,
-                text="برای دانلود، لطفاً عضو گروه شوید.",
-                disable_web_page_preview=True
-            )
+        buttons = [
+            [{"text": f"عضویت در گروه {i+1}", "url": row["link"]}]
+            for i, row in enumerate(links)
+        ]
+        await context.bot.send_message(
+            chat_id=user_id,
+            text="برای دانلود، لطفاً عضو همه گروه‌ها شوید:",
+            reply_markup={"inline_keyboard": buttons}
+        )
         return
 
     movie = get_movie_both(movie_id)
@@ -204,7 +196,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.args:
         await _deliver_movie_files(update, context, context.args[0])
         return
-    await update.message.reply_text(f"سلام 👋\nبه GoldStarMovieBot خوش آمدید!\n🎬 اینجا می‌تونید جدیدترین فیلم‌ها و سریال‌ها رو ببینید و دانلود کنید.\n{PUBLIC_GROUP_LINK}")
+    await update.message.reply_text(f"سلام 👋\nبه GoldStarMovieBot خوش آمدید!\n🎬 اینجا می‌تونید جدیدترین فیلم‌ها و سریال‌ها رو ببینید و دانلود کنید.")
 
 async def download(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.args:
