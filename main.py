@@ -24,6 +24,7 @@ logging.basicConfig(level=logging.INFO)
 TOKEN = os.environ.get("BOT_TOKEN")
 PRIVATE_GROUP_ID = int(os.environ.get("PRIVATE_GROUP_ID"))
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
+BOT_LINK = os.environ.get("BOT_LINK")
 PORT = int(os.environ.get("PORT", 8080))
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")
@@ -79,6 +80,8 @@ def get_group_links():
     return response.data or []
 
 def add_group_link(link: str):
+    if not link.startswith("https://t.me/"):
+        link = "https://t.me/" + link.lstrip("@")
     supabase.table("group_links").insert({"link": link}).execute()
 
 def remove_group_link(link_id: int):
@@ -95,9 +98,6 @@ def save_user_both(user_id):
     save_user_supabase(user_id)
 
 # ───── Membership Check ─────
-async def is_member_public_group(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> bool:
-    return True  # حالا فقط لینک‌ها چک می‌شن
-
 async def is_member_all_groups(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> bool:
     links = get_group_links()
     if not links:
@@ -124,7 +124,7 @@ async def send_poster_to_public(context: ContextTypes.DEFAULT_TYPE, movie_id: st
             await context.bot.send_photo(
                 chat_id=PRIVATE_GROUP_ID,
                 photo=poster_id,
-                caption=caption_text if i == 0 else None,
+                caption=caption_text,
                 parse_mode=ParseMode.HTML
             )
         except Exception as e:
@@ -133,10 +133,11 @@ async def send_poster_to_public(context: ContextTypes.DEFAULT_TYPE, movie_id: st
 # ───── Deliver Movie Files ─────
 async def _deliver_movie_files(update: Update, context: ContextTypes.DEFAULT_TYPE, movie_id: str):
     user_id = update.effective_user.id
-    if not await is_member_all_groups(context, user_id):
-        links = get_group_links()
+    links = get_group_links()
+
+    if links and not await is_member_all_groups(context, user_id):
         buttons = [[InlineKeyboardButton("عضو گروه", url=row['link'])] for row in links]
-        keyboard = InlineKeyboardMarkup(buttons) if buttons else None
+        keyboard = InlineKeyboardMarkup(buttons)
         await context.bot.send_message(
             chat_id=user_id,
             text="برای دانلود، لطفاً عضو همه گروه‌ها شوید:",
@@ -150,33 +151,20 @@ async def _deliver_movie_files(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     sent_messages = []
-    for f in movie['files']:
+    deep_link = f"{BOT_LINK}?start={movie_id}"
+    # لینک دانلود به صورت متن داخل پوستر
+    caption_text = f"{movie['description'].strip() or '🎬 GoldStarMovie'}\n\n📥 Download | دانلـــود ({deep_link})"
+
+    for poster_id in movie['poster_file_ids']:
         try:
-            if f['type'] == 'photo':
-                sent = await context.bot.send_photo(chat_id=user_id, photo=f['file_id'], caption=f.get('caption', ''))
-            elif f['type'] == 'video':
-                sent = await context.bot.send_video(chat_id=user_id, video=f['file_id'], caption=f.get('caption', ''))
-            else:
-                sent = await context.bot.send_document(chat_id=user_id, document=f['file_id'], caption=f.get('caption', ''))
-            sent_messages.append(sent)
+            await context.bot.send_photo(
+                chat_id=user_id,
+                photo=poster_id,
+                caption=caption_text,
+                parse_mode=ParseMode.HTML
+            )
         except Exception as e:
-            print("Error sending file:", e)
-
-    warning_msg = await context.bot.send_message(
-        chat_id=user_id,
-        text="🛑⚠️ توجه: مدیای ارسال شده پس از 2 دقیقه حذف خواهد شد. لطفا پیام را ذخیره کنید. ⚠️🛑"
-    )
-    sent_messages.append(warning_msg)
-
-    async def delete_after_delay(chat_id, messages, delay=120):
-        await asyncio.sleep(delay)
-        for msg in messages:
-            try:
-                await context.bot.delete_message(chat_id=chat_id, message_id=msg.message_id)
-            except Exception:
-                continue
-
-    asyncio.create_task(delete_after_delay(user_id, sent_messages))
+            print("Error sending poster:", e)
 
 # ───── Draft Timeout ─────
 async def draft_timeout(chat_id: int, delay: int = 600):
