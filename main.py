@@ -79,9 +79,15 @@ def get_group_links():
     response = supabase.table("group_links").select("*").execute()
     return response.data or []
 
-def add_group_link(link: str):
+def normalize_link(link: str):
+    if link.startswith("@"):
+        return f"https://t.me/{link.lstrip('@')}"
     if not link.startswith("https://t.me/"):
-        link = "https://t.me/" + link.lstrip("@")
+        return f"https://t.me/{link}"
+    return link
+
+def add_group_link(link: str):
+    link = normalize_link(link)
     supabase.table("group_links").insert({"link": link}).execute()
 
 def remove_group_link(link_id: int):
@@ -104,7 +110,8 @@ async def is_member_all_groups(context: ContextTypes.DEFAULT_TYPE, user_id: int)
         return True
     for row in links:
         try:
-            member = await context.bot.get_chat_member(row['link'].split("https://t.me/")[-1], user_id)
+            username = row['link'].split("https://t.me/")[-1]
+            member = await context.bot.get_chat_member(username, user_id)
             if member.status not in ("member", "administrator", "creator"):
                 return False
         except Exception:
@@ -119,7 +126,7 @@ async def send_poster_to_public(context: ContextTypes.DEFAULT_TYPE, movie_id: st
         return
 
     caption_text = movie['description'].strip() or "🎬 GoldStarMovie"
-    for i, poster_id in enumerate(movie['poster_file_ids']):
+    for poster_id in movie['poster_file_ids']:
         try:
             await context.bot.send_photo(
                 chat_id=PRIVATE_GROUP_ID,
@@ -136,7 +143,7 @@ async def _deliver_movie_files(update: Update, context: ContextTypes.DEFAULT_TYP
     links = get_group_links()
 
     if links and not await is_member_all_groups(context, user_id):
-        buttons = [[InlineKeyboardButton("عضو گروه", url=row['link'])] for row in links]
+        buttons = [[InlineKeyboardButton("عضو گروه", url=normalize_link(row['link']))] for row in links]
         keyboard = InlineKeyboardMarkup(buttons)
         await context.bot.send_message(
             chat_id=user_id,
@@ -152,7 +159,7 @@ async def _deliver_movie_files(update: Update, context: ContextTypes.DEFAULT_TYP
 
     sent_messages = []
     deep_link = f"{BOT_LINK}?start={movie_id}"
-    # لینک دانلود به صورت متن داخل پوستر
+    # لینک دانلود به صورت متن داخل پوستر (شیشه‌ای نیست)
     caption_text = f"{movie['description'].strip() or '🎬 GoldStarMovie'}\n\n📥 Download | دانلـــود ({deep_link})"
 
     for poster_id in movie['poster_file_ids']:
@@ -182,7 +189,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     links = get_group_links()
-    buttons = [[InlineKeyboardButton("عضو گروه", url=row['link'])] for row in links]
+    buttons = [[InlineKeyboardButton("عضو گروه", url=normalize_link(row['link']))] for row in links]
     keyboard = InlineKeyboardMarkup(buttons) if links else None
 
     text = (
@@ -221,7 +228,7 @@ async def addlink(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     link = context.args[0]
     add_group_link(link)
-    await update.message.reply_text(f"✅ لینک اضافه شد:\n{link}")
+    await update.message.reply_text(f"✅ لینک اضافه شد:\n{normalize_link(link)}")
 
 async def listlinks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
