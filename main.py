@@ -3,7 +3,7 @@ import json
 import asyncio
 from threading import Thread
 from flask import Flask
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 from telegram.ext import (
     ApplicationBuilder,
@@ -42,12 +42,12 @@ def home():
 
 @app.route("/health")
 def health():
-    return "OK", 200  # مسیر سلامت برای UptimeRobot
+    return "OK", 200
 
 def run_flask():
     app.run(host="0.0.0.0", port=PORT)
 
-# ───── Supabase Functions ─────
+# ───── Supabase: Movies ─────
 def add_movie_supabase(movie_id, poster_file_ids, description, is_series=0, season=0, episode=0, files_json=None):
     supabase.table("movies").upsert({
         "movie_id": movie_id,
@@ -236,6 +236,39 @@ async def private_group_monitor(update: Update, context: ContextTypes.DEFAULT_TY
         )
         await send_poster_to_public(context, movie_id)
 
+# ───── Admin Commands (مدیریت لینک شیشه‌ای) ─────
+async def addlink(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return await update.message.reply_text("⛔ شما دسترسی ندارید.")
+    if not context.args:
+        return await update.message.reply_text("❌ لینک را وارد کنید.\nمثال: /addlink https://t.me/xxxx")
+    link = context.args[0]
+    supabase.table("group_links").insert({"link": link}).execute()
+    await update.message.reply_text(f"✅ لینک اضافه شد:\n{link}")
+
+async def listlinks(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return await update.message.reply_text("⛔ شما دسترسی ندارید.")
+    res = supabase.table("group_links").select("*").execute()
+    links = res.data or []
+    if not links:
+        return await update.message.reply_text("⚠️ هیچ لینکی ثبت نشده است.")
+    buttons = [[InlineKeyboardButton(link["link"], url=link["link"])] for link in links]
+    keyboard = InlineKeyboardMarkup(buttons)
+    await update.message.reply_text("🔗 لینک‌های ثبت‌شده:", reply_markup=keyboard)
+
+async def removelink(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return await update.message.reply_text("⛔ شما دسترسی ندارید.")
+    if not context.args:
+        return await update.message.reply_text("❌ لطفاً ID لینک را وارد کنید.\n(با دستور /listlinks لیست را ببینید)")
+    try:
+        link_id = int(context.args[0])
+        supabase.table("group_links").delete().eq("id", link_id).execute()
+        await update.message.reply_text(f"✅ لینک با ID {link_id} حذف شد.")
+    except ValueError:
+        await update.message.reply_text("❌ ID باید عدد باشد.")
+
 # ───── Main ─────
 def main():
     print("✅ Starting GoldStarMovieBot...")
@@ -243,6 +276,11 @@ def main():
     telegram_app.add_handler(CommandHandler("start", start))
     telegram_app.add_handler(CommandHandler("download", download))
     telegram_app.add_handler(CommandHandler("cancel", cancel))
+
+    # ───── Admin Handlers
+    telegram_app.add_handler(CommandHandler("addlink", addlink))
+    telegram_app.add_handler(CommandHandler("listlinks", listlinks))
+    telegram_app.add_handler(CommandHandler("removelink", removelink))
 
     private_group_filter = filters.Chat(PRIVATE_GROUP_ID) & (
         filters.PHOTO | filters.VIDEO | filters.Document.ALL | filters.Sticker.ALL
