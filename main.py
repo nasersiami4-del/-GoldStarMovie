@@ -23,8 +23,9 @@ logging.basicConfig(level=logging.INFO)
 
 TOKEN = os.environ.get("BOT_TOKEN")
 PRIVATE_GROUP_ID = int(os.environ.get("PRIVATE_GROUP_ID"))
-ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
+PUBLIC_GROUP_ID = int(os.environ.get("PUBLIC_GROUP_ID"))
 BOT_LINK = os.environ.get("BOT_LINK")
+ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
 PORT = int(os.environ.get("PORT", 8080))
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")
@@ -45,7 +46,7 @@ def health():
 def run_flask():
     app.run(host="0.0.0.0", port=PORT)
 
-# ───── Supabase Functions ─────
+# ───── Supabase: Movies ─────
 def add_movie_supabase(movie_id, poster_file_ids, description, is_series=0, season=0, episode=0, files_json=None):
     supabase.table("movies").upsert({
         "movie_id": movie_id,
@@ -75,20 +76,13 @@ def get_movie_supabase(movie_id):
 def save_user_supabase(user_id):
     supabase.table("users").upsert({"user_id": str(user_id)}).execute()
 
-def get_group_links():
-    response = supabase.table("group_links").select("*").execute()
-    return response.data or []
-
-def normalize_link(link: str):
-    if link.startswith("@"):
-        return f"https://t.me/{link.lstrip('@')}"
-    if not link.startswith("https://t.me/"):
-        return f"https://t.me/{link}"
-    return link
-
+# ───── Supabase: Group Links ─────
 def add_group_link(link: str):
-    link = normalize_link(link)
     supabase.table("group_links").insert({"link": link}).execute()
+
+def get_group_links() -> list:
+    res = supabase.table("group_links").select("id, link").execute()
+    return res.data or []
 
 def remove_group_link(link_id: int):
     supabase.table("group_links").delete().eq("id", link_id).execute()
@@ -106,12 +100,12 @@ def save_user_both(user_id):
 # ───── Membership Check ─────
 async def is_member_all_groups(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> bool:
     links = get_group_links()
-    if not links:
+    if not links:  # اگر لینکی ثبت نشده باشد → بدون چک
         return True
+
     for row in links:
         try:
-            username = row['link'].split("https://t.me/")[-1]
-            member = await context.bot.get_chat_member(username, user_id)
+            member = await context.bot.get_chat_member(PUBLIC_GROUP_ID, user_id)
             if member.status not in ("member", "administrator", "creator"):
                 return False
         except Exception:
@@ -126,12 +120,15 @@ async def send_poster_to_public(context: ContextTypes.DEFAULT_TYPE, movie_id: st
         return
 
     caption_text = movie['description'].strip() or "🎬 GoldStarMovie"
-    for poster_id in movie['poster_file_ids']:
+    deep_link = f"{BOT_LINK}?start={movie_id}"
+    caption_text += f'\n\n📥 Download | دانلـــود ({deep_link})'
+
+    for i, poster_id in enumerate(movie['poster_file_ids']):
         try:
             await context.bot.send_photo(
-                chat_id=PRIVATE_GROUP_ID,
+                chat_id=PUBLIC_GROUP_ID,
                 photo=poster_id,
-                caption=caption_text,
+                caption=caption_text if i == 0 else None,
                 parse_mode=ParseMode.HTML
             )
         except Exception as e:
@@ -140,16 +137,12 @@ async def send_poster_to_public(context: ContextTypes.DEFAULT_TYPE, movie_id: st
 # ───── Deliver Movie Files ─────
 async def _deliver_movie_files(update: Update, context: ContextTypes.DEFAULT_TYPE, movie_id: str):
     user_id = update.effective_user.id
-    links = get_group_links()
-
-    if links and not await is_member_all_groups(context, user_id):
-        buttons = [[InlineKeyboardButton("عضو گروه", url=normalize_link(row['link']))] for row in links]
-        keyboard = InlineKeyboardMarkup(buttons)
-        await context.bot.send_message(
-            chat_id=user_id,
-            text="برای دانلود، لطفاً عضو همه گروه‌ها شوید:",
-            reply_markup=keyboard
-        )
+    if not await is_member_all_groups(context, user_id):
+        links = get_group_links()
+        buttons = [[InlineKeyboardButton("عضو گروه", url=row['link'])] for row in links]
+        keyboard = InlineKeyboardMarkup(buttons) if links else None
+        text = "برای دانلود، لطفاً عضو همه گروه‌ها شوید:"
+        await context.bot.send_message(chat_id=user_id, text=text, reply_markup=keyboard)
         return
 
     movie = get_movie_both(movie_id)
@@ -158,20 +151,33 @@ async def _deliver_movie_files(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     sent_messages = []
-    deep_link = f"{BOT_LINK}?start={movie_id}"
-    # لینک دانلود به صورت متن داخل پوستر (شیشه‌ای نیست)
-    caption_text = f"{movie['description'].strip() or '🎬 GoldStarMovie'}\n\n📥 Download | دانلـــود ({deep_link})"
-
-    for poster_id in movie['poster_file_ids']:
+    for f in movie['files']:
         try:
-            await context.bot.send_photo(
-                chat_id=user_id,
-                photo=poster_id,
-                caption=caption_text,
-                parse_mode=ParseMode.HTML
-            )
+            if f['type'] == 'photo':
+                sent = await context.bot.send_photo(chat_id=user_id, photo=f['file_id'], caption=f.get('caption', ''))
+            elif f['type'] == 'video':
+                sent = await context.bot.send_video(chat_id=user_id, video=f['file_id'], caption=f.get('caption', ''))
+            else:
+                sent = await context.bot.send_document(chat_id=user_id, document=f['file_id'], caption=f.get('caption', ''))
+            sent_messages.append(sent)
         except Exception as e:
-            print("Error sending poster:", e)
+            print("Error sending file:", e)
+
+    warning_msg = await context.bot.send_message(
+        chat_id=user_id,
+        text="🛑⚠️ توجه: مدیای ارسال شده پس از 2 دقیقه حذف خواهد شد. لطفا پیام را ذخیره کنید. ⚠️🛑"
+    )
+    sent_messages.append(warning_msg)
+
+    async def delete_after_delay(chat_id, messages, delay=120):
+        await asyncio.sleep(delay)
+        for msg in messages:
+            try:
+                await context.bot.delete_message(chat_id=chat_id, message_id=msg.message_id)
+            except Exception:
+                continue
+
+    asyncio.create_task(delete_after_delay(user_id, sent_messages))
 
 # ───── Draft Timeout ─────
 async def draft_timeout(chat_id: int, delay: int = 600):
@@ -183,26 +189,18 @@ async def draft_timeout(chat_id: int, delay: int = 600):
 # ───── Commands ─────
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_user_both(update.effective_user.id)
-
     if context.args:
         await _deliver_movie_files(update, context, context.args[0])
         return
 
+    # پیام خوش‌آمدگویی با لینک‌های شیشه‌ای
     links = get_group_links()
-    buttons = [[InlineKeyboardButton("عضو گروه", url=normalize_link(row['link']))] for row in links]
+    buttons = [[InlineKeyboardButton("عضو گروه", url=row['link'])] for row in links]
     keyboard = InlineKeyboardMarkup(buttons) if links else None
-
-    text = (
-        "سلام 👋\n"
-        "به GoldStarMovieBot خوش آمدید!\n"
-        "🎬 اینجا می‌تونید جدیدترین فیلم‌ها و سریال‌ها رو ببینید و دانلود کنید.\n\n"
-        "برای دانلود، لطفاً عضو گروه‌های زیر شوید:"
-    )
-
-    await update.message.reply_text(
-        text=text,
-        reply_markup=keyboard
-    )
+    text = "سلام 👋\nبه GoldStarMovieBot خوش آمدید!\n🎬 اینجا می‌تونید جدیدترین فیلم‌ها و سریال‌ها رو ببینید و دانلود کنید."
+    if links:
+        text += "\n\nبرای دانلود، لطفاً عضو گروه‌های زیر شوید:"
+    await update.message.reply_text(text=text, reply_markup=keyboard)
 
 async def download(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.args:
@@ -218,42 +216,38 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("❌ Draft فعالی وجود ندارد.")
 
-# ───── مدیریت لینک‌ها توسط ادمین ─────
+# ───── Admin Commands ─────
 async def addlink(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("❌ دسترسی ندارید!")
-        return
+        return await update.message.reply_text("⛔ شما دسترسی ندارید.")
     if not context.args:
-        await update.message.reply_text("❌ لطفاً لینک گروه را وارد کنید.")
-        return
+        return await update.message.reply_text("❌ لینک را وارد کنید.\nمثال: /addlink https://t.me/xxxx")
     link = context.args[0]
     add_group_link(link)
-    await update.message.reply_text(f"✅ لینک اضافه شد:\n{normalize_link(link)}")
+    await update.message.reply_text(f"✅ لینک اضافه شد:\n{link}")
 
 async def listlinks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("❌ دسترسی ندارید!")
-        return
+        return await update.message.reply_text("⛔ شما دسترسی ندارید.")
     links = get_group_links()
     if not links:
-        await update.message.reply_text("❌ لینکی ثبت نشده است.")
-        return
-    msg = "\n".join([f"{row['id']}: {row['link']}" for row in links])
-    await update.message.reply_text(f"لینک‌های ثبت شده:\n{msg}")
+        return await update.message.reply_text("⚠️ هیچ لینکی ثبت نشده است.")
+    text = "🔗 لینک‌های ثبت‌شده:\n\n"
+    for row in links:
+        text += f"🆔 {row['id']} → {row['link']}\n"
+    await update.message.reply_text(text)
 
 async def removelink(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("❌ دسترسی ندارید!")
-        return
+        return await update.message.reply_text("⛔ شما دسترسی ندارید.")
     if not context.args:
-        await update.message.reply_text("❌ لطفاً آیدی لینک را وارد کنید.")
-        return
+        return await update.message.reply_text("❌ لطفاً ID لینک را وارد کنید.\n(با دستور /listlinks لیست را ببینید)")
     try:
         link_id = int(context.args[0])
         remove_group_link(link_id)
-        await update.message.reply_text(f"✅ لینک با آیدی {link_id} حذف شد.")
-    except Exception:
-        await update.message.reply_text("❌ آیدی نامعتبر است.")
+        await update.message.reply_text(f"✅ لینک با ID {link_id} حذف شد.")
+    except ValueError:
+        await update.message.reply_text("❌ ID باید عدد باشد.")
 
 # ───── Private Group Monitor ─────
 async def private_group_monitor(update: Update, context: ContextTypes.DEFAULT_TYPE):
